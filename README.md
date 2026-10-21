@@ -43,7 +43,7 @@ Demo üst çubuğundan senaryo seçip EXEC örneğini yükleyin ve Çalıştır'
 ## İlk gerçek bağlantı
 
 1. SQL Server Agent servisi çalışıyor olmalı.
-2. `EDWTEMP` veritabanı, `EDWUTIL.OPR.EdwJobGenerator` prosedürü ve `EDWUTIL.OPR.EdwJobGeneratorLog` tablosu mevcut olmalı. Uygulama bu nesneleri kurmaz.
+2. `EDWUTIL.OPR.EdwJobGenerator` prosedürü ve `EDWUTIL.OPR.EdwJobGeneratorLog` tablosu mevcut olmalı. Uygulama bu nesneleri kurmaz.
 3. Uygulamada sunucu adını ve Windows veya SQL kimlik doğrulamasını seçin. Windows kimlik doğrulaması EXE'yi çalıştıran Windows hesabını kullanır.
 4. Varsayılan bağlantı ayarları **Encrypt: Optional (False)** ve **Trust server certificate: True**. Kurumunuzun bağlantı politikasına göre ayarlayın.
 5. Hesabın prosedür çalıştırma, log okuma ve ilgili Agent job'larını oluşturma, başlatma ve izleme yetkilerini DBA ile doğrulayın. Sunucuya bağlanabilmek bu yetkilerin tümünün bulunduğu anlamına gelmez.
@@ -75,9 +75,21 @@ Kaynak koddan .NET 8 SDK ile:
 
 `Publish.ps1` Windows x64 paketini üretir.
 
+## İstek akışı (danışman / çalışan)
+
+Danışmanlar job'ı doğrudan çalıştırmaz; uygulamadan `EDWUTIL.OPR.EdwJobGeneratorRequests` tablosuna istek gönderir. Yetkili çalışanlar listeden isteği seçip kendi SQL bağlantılarıyla çalıştırır.
+
+1. Tabloyu `sql/EdwJobGeneratorRequests.sql` ile elle oluşturun. Script `sureviewx` için tablo, `EdwJobGeneratorLog` ve msdb job tabloları üzerinde gereken yetkileri de içerir. Uygulama tabloyu oluşturmaz veya değiştirmez; tablo yoksa yalnız "İstek tablosu okunamadı" uyarısı gösterir.
+2. İstek tablosunun sunucusu üst çubuktaki **Ayarlar** penceresinden girilir; varsayılan `SRVDEV\PASIFIK`. Kaydedince tablo hemen okunur, erişilemiyorsa hata pencerede gösterilir. Ayar o bilgisayarın yerel kayıt dosyasında tutulur. Kaydedilmemişse paket klasöründeki `appsettings.json` (`Requests:Server`) kullanılır.
+3. Tablo okuma, istek ekleme ve job durumunu okuma uygulamaya gömülü `sureviewx` hesabıyla yapılır; danışman şifre girmez. Hesap bilgisi kaynakta şifreli tutulur. Anahtar uygulamayla birlikte dağıtıldığı için bu yöntem bilgiyi kod okuyandan gizler, ancak EXE'yi decompile eden birinden korumaz. Hesabın yetkisini yalnız bu tabloyla sınırlı tutun.
+4. **Yeni istek** penceresine EXEC kodunu yapıştırıp **İsteği gönder**'e basın. İstek tabloya yazılır, çalıştırılmaz. `ExecutedBy` boş olduğu sürece istek bekliyor sayılır.
+5. Uygulama tabloyu yaklaşık 5 saniyede bir okur. Başka bir kullanıcıdan yeni istek geldiğinde, siteyi açık tutan herkese uygulama içi ve masaüstü bildirimi gösterilir. Site ilk açıldığında bildirim izni istenir ve izin verilirse bir hoş geldin bildirimi gönderilir.
+6. Çalışan **▷ Çalıştır**'a bastığında, uygulama oturumunda ilk kez çalıştırıyorsa bağlantı penceresi açılır. Bağlandıktan sonra uygulama kapanana kadar tekrar sorulmaz. İstek, çalışanın kendi SQL bağlantısıyla tek bir UPDATE ile alınır: `ExecutedBy = SUSER_SNAME()`, `RunToken`, `ExecutedAt = SYSDATETIMEOFFSET()`. İki çalışan aynı isteği çalıştıramaz. Çalışan hesabının bu üç kolon için UPDATE yetkisi olmalıdır ve bağlandığı sunucu istek tablosunun bulunduğu sunucu olmalıdır.
+7. Durum tabloya yazılmaz. Diğer kullanıcılar `RunToken` ile prosedürün oluşturduğu `BTVY_<RunToken>_<tarih>` job'ını msdb'de bulur ve durumu, son tamamlanan adımı ve sonucu oradan okur. Oluşturma hatası `EdwJobGeneratorLog`'dan okunur. İsteği çalıştıran bilgisayar kendi ayrıntılı takibini gösterir. Çalıştıran kişi uygulamayı kapatsa da diğerleri güncel Agent durumunu görür. Agent geçmişi temizlenen eski isteklerin sonucu görünmez.
+
 ## Kullanım
 
-1. SQL Server bağlantısını açın, sunucu ve giriş bilgilerini belirtip Bağlan'a basın. Başlangıç veritabanı otomatik EDWTEMP'tir; veritabanı seçimi yoktur.
+1. SQL Server bağlantı seçimi ana ekranda gösterilmez; bağlantı penceresi bir isteği oturumda ilk kez çalıştırırken açılır. Başlangıç veritabanı her zaman master'dır; veritabanı seçimi yoktur.
 2. Yeni job ekranına `EDWUTIL.OPR.EdwJobGenerator` EXEC çağrısını yapıştırın. Parametreler otomatik çözümlenir. Ayrı manuel parametre alanı yoktur.
 3. Bildirim tercihlerini belirleyip gösterilen sunucuyu kontrol ederek Çalıştır'a basın. Tek işlemle tanım ve çalışma kaydı oluşturulur, job kuyruğa alınır. Ayrı Kaydet adımı yoktur.
 4. Çalışma durumu otomatik açılır. Daha önceki bir EXEC'i düzenleyip yeniden çalıştırabilir veya listeden tekrar başlatabilirsiniz.
@@ -89,7 +101,7 @@ EXEC ayrıştırıcısı NULL, N'...' metinlerini, çiftlenmiş tek tırnakları
 
 ## SQL çalıştırma
 
-Tüm bağlantılar, eski bağlantı ve çalışma kayıtları dahil, EDWTEMP başlangıç veritabanını kullanır. Sunucuda EDWTEMP bulunmalı ve bağlantı hesabı erişebilmelidir. Bu ayar işin veri hedefini değiştirmez: generator EDWUTIL.OPR.EdwJobGenerator, Agent sorguları msdb, paket ve SQL hedefleri ise prosedür/EXEC içindeki tam nitelikli adlardır.
+Tüm bağlantılar, eski bağlantı ve çalışma kayıtları dahil, master başlangıç veritabanını kullanır. Bu ayar işin veri hedefini değiştirmez: generator EDWUTIL.OPR.EdwJobGenerator, Agent sorguları msdb, paket ve SQL hedefleri ise prosedür/EXEC içindeki tam nitelikli adlardır.
 
 Paylaşılan prosedür job'ı oluşturur; uygulama oluşturulan job'ı bulup gerçek job_id ile `msdb.dbo.sp_start_job` çağırır. Her çalışmada benzersiz etiket üretilir, prosedürün `BTVY_<etiket>_<tarih_saat>` adına dönüştürdüğü job bulunur ve kimliğe sabitlenir.
 

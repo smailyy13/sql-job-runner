@@ -2,10 +2,10 @@ namespace SqlJobRunner;
 
 public record ConnectionInput(string Server = "", bool IntegratedSecurity = true, string UserName = "",
     string? Password = null, bool Encrypt = false, bool TrustServerCertificate = true,
-    string Database = "EDWTEMP", bool RememberPassword = true, string? SessionPasswordKey = null);
+    string Database = "master", bool RememberPassword = true, string? SessionPasswordKey = null);
 public static class ConnectionDefaults
 {
-    public const string Database = "EDWTEMP";
+    public const string Database = "master";
 }
 public record ConnectionView(string Server, bool IntegratedSecurity, string UserName, bool Encrypt,
     bool TrustServerCertificate, bool HasPassword, string Database, bool RememberPassword, string Id);
@@ -44,10 +44,22 @@ public record RunRecord
     public string CurrentStep { get; set; } = "";
     public string Message { get; set; } = "Kuyrukta bekliyor.";
     public string StepsJson { get; set; } = "[]";
+    // Row in EDWUTIL.OPR.EdwJobGeneratorRequests this run executes.
+    public int? RequestId { get; init; }
 }
 public record AgentStep(int StepId, string Name, int Status, string Message, int Duration);
 public record Notification(string Id, string RunId, string JobName, string Status, DateTimeOffset CreatedUtc, bool Read);
 public record ExecuteJobRequest(JobDefinition Job,string RequestId);
+// Server holding EDWUTIL.OPR.EdwJobGeneratorRequests, reached with the embedded request login.
+public record RequestSettings(string Server = RequestSettings.DefaultServer, bool Encrypt = false, bool TrustServerCertificate = true)
+{
+    public const string DefaultServer = @"SRVDEV\PASIFIK";
+}
+// A connection must be confirmed once per application session before running requests.
+public sealed class ConnectionSession
+{
+    public volatile bool Connected;
+}
 public static class RunStates
 {
     public static bool Active(string status) => status is "Queued" or "Submitting" or "Starting" or "Running" or "Unknown";

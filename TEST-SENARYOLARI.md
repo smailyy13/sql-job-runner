@@ -14,6 +14,14 @@
 | DEMO_UNKNOWN | Yaklaşık 15 saniye sonra belirsiz durum; kendiliğinden tekrar başlamaz |
 | DEMO_GENERATOR_ERROR | Job oluşturma hatası; Agent çalışması başlamaz |
 
+## İstek akışı
+
+Demo modunda istek tablosu bellekte tutulur ve uygulama kapanınca sıfırlanır.
+
+1. **EXEC örneği** ile pencereyi açıp **İsteği gönder**'e basın. İstek "Bekliyor" durumunda listelenmeli, çalışmamalı.
+2. Satırdaki **▷ Çalıştır**'a basın. Bağlantı penceresi açılmalı. `DEMO` ile bağlanınca çalıştırma onayı gelmeli; onaylayınca durum Kuyrukta → Çalışıyor → sonuç olarak ilerlemeli.
+3. İkinci bir isteği çalıştırın. Bağlantı penceresi tekrar açılmamalı. Uygulamayı kapatıp açtıktan sonra ilk çalıştırmada yeniden açılmalı.
+
 ## Arayüz testleri
 
 1. Başarılı senaryoyu çalıştırın. Satıra tıklayın; Özet, Adımlar, Mesajlar ve Parametreler sekmelerini inceleyin. Çalışma geçmişinde sonucu görün.

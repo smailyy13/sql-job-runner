@@ -22,6 +22,18 @@ public sealed class Store
         Execute(db, "PRAGMA journal_mode=WAL;");
         Execute(db, "CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings(id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
         Execute(db, "CREATE TABLE IF NOT EXISTS recent_connections(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
+        Execute(db, "CREATE TABLE IF NOT EXISTS app_settings(id TEXT PRIMARY KEY, body TEXT NOT NULL);");
+        requestDefaults = new RequestSettings(
+            string.IsNullOrWhiteSpace(config["Requests:Server"]) ? RequestSettings.DefaultServer : config["Requests:Server"]!,
+            config.GetValue("Requests:Encrypt", false), config.GetValue("Requests:TrustServerCertificate", true));
+    }
+    private readonly RequestSettings requestDefaults;
+    // Saved from the Settings dialog; until then appsettings.json, then the built-in default.
+    public RequestSettings GetRequestSettings() { lock (gate) return All<RequestSettings>("app_settings").SingleOrDefault() ?? requestDefaults; }
+    public void SetRequestSettings(RequestSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.Server)) throw new ArgumentException("İstek sunucusu zorunlu.");
+        lock (gate) Save("app_settings", "requests", settings with { Server = settings.Server.Trim() });
     }
     private SqliteConnection Open() { var db = new SqliteConnection(connectionString); db.Open(); return db; }
     private static void Execute(SqliteConnection db, string sql, params (string, object?)[] args)
@@ -53,6 +65,7 @@ public sealed class Store
             return true;
         }
     }
+    public bool HasActiveRun(string jobName) { lock (gate) return Runs().Any(r => RunStates.Active(r.Status) && r.Definition.JobName.Equals(jobName.Trim(), StringComparison.OrdinalIgnoreCase)); }
     public void CloseTracking(string id)
     {
         lock (gate)
@@ -74,7 +87,7 @@ public sealed class Store
             Save("jobs", job.Id, job);
         }
     }
-    public RunRecord Execute(JobDefinition job,string requestId)
+    public RunRecord Execute(JobDefinition job,string requestId,int? jobRequestId=null)
     {
         lock(gate)
         {
@@ -97,7 +110,7 @@ public sealed class Store
                 job=job with {Id=sameName.Id};
             }
             if(Runs().Any(r=>r.JobId==job.Id && RunStates.Active(r.Status))) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
-            var run=new RunRecord {Id=id,JobId=job.Id,Definition=job,ConnectionSnapshot=JsonSerializer.Serialize(connection,Json)};
+            var run=new RunRecord {Id=id,JobId=job.Id,Definition=job,ConnectionSnapshot=JsonSerializer.Serialize(connection,Json),RequestId=jobRequestId};
             using var db=Open();using var tx=db.BeginTransaction();using var cmd=db.CreateCommand();cmd.Transaction=tx;
             cmd.CommandText="INSERT INTO jobs(id,body) VALUES($id,$body) ON CONFLICT(id) DO UPDATE SET body=excluded.body";
             cmd.Parameters.AddWithValue("$id",job.Id);cmd.Parameters.AddWithValue("$body",JsonSerializer.Serialize(job,Json));cmd.ExecuteNonQuery();
@@ -155,14 +168,27 @@ public sealed class Store
     {
         lock(gate) { var c=All<ConnectionInput>("settings").SingleOrDefault();return c is null?null:c with {Database=ConnectionDefaults.Database}; }
     }
-    public static string ConnectionId(ConnectionInput c) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{c.Server.ToUpperInvariant()}|{c.Database.ToUpperInvariant()}|{c.IntegratedSecurity}|{c.UserName.ToUpperInvariant()}")))[..24];
+    // The database is fixed, so records saved under an older default share the same id.
+    public static string ConnectionId(ConnectionInput c) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{c.Server.ToUpperInvariant()}|{ConnectionDefaults.Database.ToUpperInvariant()}|{c.IntegratedSecurity}|{c.UserName.ToUpperInvariant()}")))[..24];
     public ConnectionView View(ConnectionInput c)
     {
         lock(gate) return new(c.Server,c.IntegratedSecurity,c.UserName,c.Encrypt,c.TrustServerCertificate,
             c.Password is not null || (c.SessionPasswordKey is not null && sessionPasswords.ContainsKey(c.SessionPasswordKey)),ConnectionDefaults.Database,c.RememberPassword,ConnectionId(c));
     }
-    public List<ConnectionView> RecentConnections() { lock(gate) return All<ConnectionInput>("recent_connections").Select(View).ToList(); }
-    public void ForgetConnection(string id) { lock(gate) { using var db = Open(); Execute(db,"DELETE FROM recent_connections WHERE id=$id",("$id",id)); } }
+    public List<ConnectionView> RecentConnections() { lock(gate) return All<ConnectionInput>("recent_connections").Select(View).DistinctBy(c => c.Id).ToList(); }
+    public void ForgetConnection(string id)
+    {
+        lock(gate)
+        {
+            using var db = Open(); var stale = new List<string>();
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = "SELECT id,body FROM recent_connections"; using var r = cmd.ExecuteReader();
+                while (r.Read()) if (r.GetString(0) == id || ConnectionId(JsonSerializer.Deserialize<ConnectionInput>(r.GetString(1), Json)!) == id) stale.Add(r.GetString(0));
+            }
+            foreach (var key in stale) Execute(db,"DELETE FROM recent_connections WHERE id=$id",("$id",key));
+        }
+    }
     public ConnectionInput DraftConnection(ConnectionInput input)
     {
         lock(gate)
