@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SQL Job Runner</title><link rel="stylesheet" href="theme.css"><link rel="stylesheet" href="app.css">
+  <script src="localization.js" defer></script><script src="exec-import.js" defer></script><script src="app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><h1>SQL Job Runner</h1></div>
+    <button class="endpoint" id="connectionBtn"><span class="endpoint-tag">SQL SERVER</span><span class="endpoint-value" id="connectionLabel"><span data-i18n="Bağlantı seçin">Bağlantı seçin</span></span></button>
+    <div class="actions"><button class="btn primary" id="addBtn"><span data-i18n="Yeni job">Yeni job</span></button><button class="iconbtn" id="notificationsBtn" title="Bildirimler" data-i18n-title="Bildirimler"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span id="unreadCount">0</span></button><button class="iconbtn" id="themeBtn" title="Temayı değiştir" data-i18n-title="Temayı değiştir">☾</button><button class="iconbtn" id="langBtn" title="English"><span class="lang" id="langLabel">EN</span></button></div>
+  </header>
+  <div class="statusbar"><span id="healthText"><span data-i18n="Bağlanıyor…">Bağlanıyor…</span></span><span class="grow"></span><div class="counts"><span>Job <b id="totalCount">0</b></span><span><span data-i18n="Aktif">Aktif</span> <b class="blue" id="activeCount">0</b></span><span><span data-i18n="Başarılı">Başarılı</span> <b class="green" id="successCount">0</b></span><span><span data-i18n="Uyarı">Uyarı</span> <b class="amber" id="attentionCount">0</b></span></div></div>
+  <div id="demoTools" class="toolbar" hidden><strong>TEST / DEMO</strong><span>SQL bağlantısı yok / No SQL connection</span><select id="demoCase" class="select" aria-label="Demo scenario"></select><button class="btn" id="loadDemoCase">EXEC örneği / Load EXEC</button><span id="demoDescription" class="hint"></span></div>
+  <main class="workspace">
+    <section class="jobs-panel">
+      <div class="toolbar"><div class="viewtabs"><button class="vtab active" data-view="jobs"><span data-i18n="Job'lar">Job'lar</span></button><button class="vtab" data-view="history"><span data-i18n="Çalışma geçmişi">Çalışma geçmişi</span></button></div><span class="grow"></span><select id="statusFilter" class="select sm" aria-label="Durum filtresi" data-i18n-aria-label="Durum filtresi"><option value="" data-i18n="Tüm durumlar">Tüm durumlar</option><option value="active" data-i18n="Aktif">Aktif</option><option value="Succeeded" data-i18n="Başarılı">Başarılı</option><option value="Failed" data-i18n="Hatalı">Hatalı</option><option value="Unknown" data-i18n="Belirsiz">Belirsiz</option></select><input id="search" class="input sm" type="search" placeholder="Job adı veya paket ara…" data-i18n-placeholder="Job adı veya paket ara…" aria-label="Job ara" data-i18n-aria-label="Job ara"></div>
+      <div class="table-scroll"><table class="jobs-table"><thead id="tableHead"></thead><tbody id="tableBody"></tbody></table><div class="empty-state" id="emptyState"><h2><span data-i18n="Kayıtlı job yok.">Kayıtlı job yok.</span></h2></div></div>
+      <div class="table-foot"><span id="rowCount">0 kayıt</span><span id="refreshTime">—</span></div>
+    </section>
+    <div class="splitter" id="panelSplitter" role="separator" aria-label="Panel boyutu" data-i18n-aria-label="Panel boyutu" aria-orientation="horizontal" tabindex="0"></div>
+    <section class="detail-panel">
+      <div class="lower-head"><span class="lower-title" id="detailTitle"><span data-i18n="Job detayları">Job detayları</span></span><span class="grow"></span><div class="viewtabs" id="detailTabs"><button class="vtab active" data-tab="summary"><span data-i18n="Özet">Özet</span></button><button class="vtab" data-tab="steps"><span data-i18n="Adımlar">Adımlar</span></button><button class="vtab" data-tab="logs"><span data-i18n="Mesajlar">Mesajlar</span></button><button class="vtab" data-tab="parameters"><span data-i18n="Parametreler">Parametreler</span></button></div></div>
+      <div id="detailBody" class="detail-body"><div class="detail-placeholder"><span data-i18n="Bir kayıt seçin.">Bir kayıt seçin.</span></div></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="jobDialog">
+ <form id="jobForm">
+  <div class="dialog-head"><h2 id="jobDialogTitle"><span data-i18n="Yeni job">Yeni job</span></h2><button class="x" type="button" data-close="jobDialog" aria-label="Kapat" data-i18n-aria-label="Kapat">✕</button></div>
+  <div class="form-body">
+   <input type="hidden" name="id">
+   <div class="section-label"><span data-i18n="EXEC KODU">EXEC KODU</span></div>
+   <textarea id="execInput" rows="10" maxlength="64000" required aria-label="EdwJobGenerator EXEC kodu" data-i18n-aria-label="EdwJobGenerator EXEC kodu" placeholder="EXEC EDWUTIL.[OPR].[EdwJobGenerator] …" spellcheck="false"></textarea>
+   <div class="exec-actions"><span id="execImportStatus" role="status"></span></div>
+   <input type="hidden" name="jobName"><input type="hidden" name="migPackageName"><input type="hidden" name="stgPackageName"><input type="hidden" name="stgFullInitialLoad" value="false"><input type="hidden" name="skeyPackageName"><input type="hidden" name="lryPackageName"><input type="hidden" name="edwPackageName"><input type="hidden" name="edwdmPackageName"><input type="hidden" name="sql1"><input type="hidden" name="sql2">
+   <div class="section-label"><span data-i18n="BİLDİRİMLER">BİLDİRİMLER</span></div><div class="check-row"><label class="checkbox"><input type="checkbox" name="notifySuccess" checked><span data-i18n="Başarıda bildir">Başarıda bildir</span></label><label class="checkbox"><input type="checkbox" name="notifyFailure" checked><span data-i18n="Hata veya iptalde bildir">Hata veya iptalde bildir</span></label></div>
+   <div class="inline-error" id="jobError" role="alert" hidden></div>
+  </div>
+  <div class="dialog-foot"><span class="hint" id="executionTarget"></span><span class="grow"></span><button type="button" class="btn ghost" data-close="jobDialog"><span data-i18n="İptal">İptal</span></button><button class="btn primary" id="saveJobBtn" type="submit" disabled><span data-i18n="Çalıştır">Çalıştır</span></button></div>
+ </form>
+</dialog>
+<dialog id="connectionDialog">
+ <form id="connectionForm">
+  <div class="dialog-head"><h2><span data-i18n="Bağlan">Bağlan</span></h2><button class="x" type="button" data-close="connectionDialog" aria-label="Kapat" data-i18n-aria-label="Kapat">✕</button></div>
+  <div class="dialog-body">
+   <div class="recent"><h3><span data-i18n="Son bağlantılar">Son bağlantılar</span></h3><div id="recentList" class="recent-list"><p class="hint"><span data-i18n="Yok.">Yok.</span></p></div></div>
+   <div class="props"><h3><span data-i18n="Bağlantı özellikleri">Bağlantı özellikleri</span></h3>
+    <label class="row"><span><span data-i18n="Sunucu adı">Sunucu adı</span></span><input type="text" id="cServer" name="server" required placeholder="SRVDEV\PASIFIK" autocomplete="off"></label>
+    <label class="row"><span><span data-i18n="Kimlik doğrulama">Kimlik doğrulama</span></span><select name="auth" id="authSelect" class="select"><option value="windows">Windows Authentication</option><option value="sql">SQL Server Authentication</option></select></label>
+    <label class="row" id="rowUser"><span><span data-i18n="Kullanıcı adı">Kullanıcı adı</span></span><input type="text" name="userName" autocomplete="off"></label>
+    <label class="row" id="rowPass"><span><span data-i18n="Parola">Parola</span></span><input type="password" name="password" autocomplete="new-password"></label>
+    <label class="row check-row" id="rowRemember"><span></span><span class="check"><input type="checkbox" name="rememberPassword"> <span><span data-i18n="Parolayı hatırla">Parolayı hatırla</span></span></span></label>
+    <label class="row"><span>Encrypt</span><select name="encrypt" class="select"><option value="false">Optional (False)</option><option value="true">Mandatory (True)</option></select></label>
+    <label class="row"><span>Trust server certificate</span><select name="trustServerCertificate" class="select"><option value="true">True</option><option value="false">False</option></select></label>
+    <p class="conn-status" id="connectionError" role="status"></p>
+   </div>
+  </div>
+  <div class="dialog-foot"><div class="grow"></div><button class="btn ghost" type="button" data-close="connectionDialog"><span data-i18n="İptal">İptal</span></button><button class="btn primary" id="connectBtn" type="submit"><span data-i18n="Bağlan">Bağlan</span></button></div>
+ </form>
+</dialog>
+<dialog id="notificationDialog" class="small-dialog"><div class="dialog-head"><h2><span data-i18n="Bildirimler">Bildirimler</span></h2><button class="x" type="button" data-close="notificationDialog" aria-label="Kapat" data-i18n-aria-label="Kapat">✕</button></div><div class="notification-actions"><button class="btn sm" id="enableNotificationsBtn"><span data-i18n="Masaüstü bildirimleri">Masaüstü bildirimleri</span></button><button class="btn ghost sm" id="readNotificationsBtn"><span data-i18n="Tümünü okundu işaretle">Tümünü okundu işaretle</span></button></div><div id="notificationList"></div></dialog>
+<dialog id="confirmDialog" class="small-dialog"><div class="dialog-head"><h2 id="confirmTitle"><span data-i18n="Job çalıştır">Job çalıştır</span></h2></div><div class="form-body"><p id="confirmText"></p><div id="confirmInfo" class="confirm-info"></div></div><div class="dialog-foot"><button class="btn ghost" id="confirmCancel"><span data-i18n="İptal">İptal</span></button><span class="grow"></span><button class="btn primary" id="confirmYes"><span data-i18n="Çalıştır">Çalıştır</span></button></div></dialog>
+<div id="toast" role="status" hidden></div>
+</body></html>

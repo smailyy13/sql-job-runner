@@ -1,0 +1,16 @@
+bin/
+obj/
+publish/
+.vs/
+*.user
+data/
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.zip
+*.pid
+runner.lock
+.env
+.env.*
