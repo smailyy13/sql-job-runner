@@ -25,6 +25,7 @@ CREATE TABLE OPR.EdwJobGeneratorRequests
     ExecutedBy         NVARCHAR(128) NULL,
     RunToken           VARCHAR(50)   NULL,
     ExecutedAt         DATETIMEOFFSET(0) NULL,
+    FinishedAt         DATETIMEOFFSET(0) NULL,
     CONSTRAINT CK_EdwJobGeneratorRequests_Stg CHECK (StgFullInitialLoad IN ('YES','NO'))
 );
 GO
@@ -39,7 +40,7 @@ GO
 -- Çalışanlar isteği kendi SQL hesaplarıyla alır; ExecutedBy = SUSER_SNAME().
 -- [CALISAN_ROLU] yerine çalışanların kullanıcı/rol adını yazın. Yalnız bu üç kolon güncellenebilir.
 GRANT SELECT ON OPR.EdwJobGeneratorRequests TO [CALISAN_ROLU];
-GRANT UPDATE (ExecutedBy, RunToken, ExecutedAt) ON OPR.EdwJobGeneratorRequests TO [CALISAN_ROLU];
+GRANT UPDATE (ExecutedBy, RunToken, ExecutedAt, FinishedAt) ON OPR.EdwJobGeneratorRequests TO [CALISAN_ROLU];
 GO
 
 -- Job durumunu herkesin görebilmesi için msdb okuma (yalnız SELECT):

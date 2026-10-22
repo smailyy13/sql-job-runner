@@ -115,8 +115,8 @@ function runAction(r) {
 }
 
 function requestDuration(r) {
-  if (!r.executedAt) return '—';
-  return duration({createdUtc:r.executedAt,finishedUtc:requestActive(r.status) ? null : r.finishedAt || null});
+  if (!r.startedAt || (!requestActive(r.status) && !r.finishedAt)) return '—';
+  return duration({createdUtc:r.startedAt,finishedUtc:requestActive(r.status) ? null : r.finishedAt || null});
 }
 function filteredRequests(rows) {
   const filter = $('statusFilter').value, query = $('search').value.toLocaleLowerCase('tr');
@@ -125,12 +125,12 @@ function filteredRequests(rows) {
 // Every request in the table, most recent activity first.
 function renderHistory() {
   const rows = filteredRequests(state.requests || []).sort((a,b) => requestTime(b) - requestTime(a) || b.requestId - a.requestId);
-  $('tableHead').innerHTML = `<tr><th>#</th><th>${t("Job adı")}</th><th>${t("Kullanıcı etiketi")}</th><th>${t("Durum")}</th><th>${t("İsteyen")}</th><th>${t("Çalıştıran")}</th><th>${t("İstek zamanı")}</th><th>${t("Başlangıç")}</th><th>${t("Süre")}</th><th>${t("İşlemler")}</th></tr>`;
+  $('tableHead').innerHTML = `<tr><th>#</th><th>${t("Job adı")}</th><th>${t("Kullanıcı etiketi")}</th><th>${t("Durum")}</th><th>${t("İsteyen")}</th><th>${t("Çalıştıran")}</th><th>${t("İstek zamanı")}</th><th>${t("Başlangıç")}</th><th>${t("Bitiş zamanı")}</th><th>${t("Süre")}</th><th>${t("İşlemler")}</th></tr>`;
   $('tableBody').innerHTML = rows.map(r => {
     const id = String(r.requestId);
     return `<tr data-kind="request" data-id="${esc(id)}" tabindex="0" class="${selection?.kind === 'request' && selection.id === id ? 'selected' : ''}">
       <td class="job-name">${esc(id)}</td><td><div class="job-name">${esc(r.agentJobName || r.jobName)}</div></td><td>${esc(r.jobName)}</td><td>${badge(r.status)}</td>
-      <td>${esc(r.requestedBy)}</td><td>${esc(r.executedBy || '—')}</td><td>${clock(r.requestedAt)}</td><td>${clock(r.executedAt)}</td><td class="job-name">${requestDuration(r)}</td><td><div class="row-actions">${runAction(r)}</div></td></tr>`;
+      <td>${esc(r.requestedBy)}</td><td>${esc(r.executedBy || '—')}</td><td>${clock(r.requestedAt)}</td><td>${clock(r.startedAt)}</td><td>${clock(r.finishedAt)}</td><td class="job-name">${requestDuration(r)}</td><td><div class="row-actions">${runAction(r)}</div></td></tr>`;
   }).join('');
   $('emptyState').hidden = rows.length > 0;
   $('emptyState').querySelector('h2').textContent = state.requests?.length ? t('Kayıt bulunamadı.') : t('Henüz istek yok.');
@@ -205,7 +205,7 @@ function renderDetail() {
 function renderRequestDetail(request,run) {
   if (detailTab === 'steps') { $('detailBody').innerHTML = `${request.currentStep ? `<div class="message-box">${esc(message(request.currentStep))}</div>` : ''}<div class="detail-placeholder">${t("Adım ayrıntıları isteği çalıştıran bilgisayarda görünür.")}</div>`; return; }
   if (detailTab === 'logs') { $('detailBody').innerHTML = `<pre class="code">${esc(`[${clock(request.requestedAt)}] ${t("İstek oluşturuldu.")} ${request.requestedBy}\n${request.executedAt ? `[${clock(request.executedAt)}] ${t("Çalıştıran")}: ${request.executedBy || '—'}\n` : ''}${t("Durum")}: ${t(labels[request.status] || request.status)}\n\n${message(request.statusMessage || '')}`)}</pre>`; return; }
-  const entries = [[t('Durum'),badge(request.status)],[t('İsteyen'),esc(request.requestedBy)],[t('İstek zamanı'),clock(request.requestedAt)],[t('Çalıştıran'),esc(request.executedBy || '—')],[t('Job adı'),esc(request.agentJobName || request.jobName)],[t('Kullanıcı etiketi'),esc(request.jobName)],[t('Başlangıç'),clock(request.executedAt)],[t('Bitiş'),clock(request.finishedAt)],[t('Aktif adım'),esc(message(request.currentStep || '—'))]];
+  const entries = [[t('Durum'),badge(request.status)],[t('İsteyen'),esc(request.requestedBy)],[t('İstek zamanı'),clock(request.requestedAt)],[t('Çalıştıran'),esc(request.executedBy || '—')],[t('Job adı'),esc(request.agentJobName || request.jobName)],[t('Kullanıcı etiketi'),esc(request.jobName)],[t('Başlangıç'),clock(request.startedAt)],[t('Bitiş'),clock(request.finishedAt)],[t('Aktif adım'),esc(message(request.currentStep || '—'))]];
   $('detailBody').innerHTML = `<div class="detail-grid">${entries.map(([label,value]) => `<div><label>${label}</label><div class="detail-value">${value}</div></div>`).join('')}</div>${request.statusMessage && ['Failed','Unknown','Unverified','Canceled'].includes(request.status) ? `<div class="message-box warning">${esc(message(request.statusMessage))}</div>` : ''}${request.status === 'Pending' || rerunnable(request) ? `<button class="btn primary sm close-tracking" id="runRequestBtn" >${t(request.status === 'Pending' ? "▷ Çalıştır" : "↻ Tekrar çalıştır")}</button>}` : ''}${run?.status === 'Unknown' ? `<button class="btn sm close-tracking" id="closeTrackingBtn">${t("İzlemeyi kapat")}</button>` : ''}`;
   if ($('runRequestBtn')) $('runRequestBtn').onclick = () => runRequest(request);
   if ($('closeTrackingBtn')) $('closeTrackingBtn').onclick = () => confirmAction(t('İzlemeyi kapat'),t('SQL Server Agent üzerindeki gerçek job durdurulmaz. İzleme sonlandırılır ve yeni çalıştırma kilidi kaldırılır. Yeniden çalıştırmadan önce Agent durumunu kontrol edin.'),request.jobName,t('İzlemeyi kapat'),async () => { await api(`/api/runs/${run.id}/close-tracking`,'POST'); toast(t('İzleme kapatıldı. Job sonucu doğrulanmadı.')); });

@@ -27,6 +27,7 @@ public record JobRequest
     public string? StatusMessage { get; init; }
     public string? CurrentStep { get; init; }
     public string? AgentJobName { get; init; }
+    public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? FinishedAt { get; init; }
     public JobDefinition ToDefinition() => new()
     {
@@ -35,7 +36,7 @@ public record JobRequest
         Sql2 = Sql2, EdwdmPackageName = EdwdmPackageName
     };
 }
-public record AgentStatus(string Status, string? Message, string? CurrentStep, string? AgentJobName, DateTimeOffset? FinishedAt);
+public record AgentStatus(string Status, string? Message, string? CurrentStep, string? AgentJobName, DateTimeOffset? FinishedAt, DateTimeOffset? StartedAt = null);
 public record RunRequestInput(string RequestId);
 
 public interface IRequestStore
@@ -45,6 +46,7 @@ public interface IRequestStore
     // Atomically takes a request with the employee's own connection: a waiting one (previousToken null) or one whose
     // previous attempt (previousToken) failed or was canceled.
     Task<ClaimResult> Claim(int id, string runToken, string? previousToken, ConnectionInput employee, CancellationToken ct);
+    Task SaveFinishedAt(int id, string runToken, DateTimeOffset finishedAt, ConnectionInput employee, CancellationToken ct);
     Task Release(int id, string runToken, ConnectionInput employee, CancellationToken ct);
     // Agent state of taken requests, read from msdb by their run token. Missing keys: not readable yet.
     Task<Dictionary<int, AgentStatus>> Statuses(IReadOnlyList<JobRequest> taken, CancellationToken ct);
@@ -67,7 +69,7 @@ public static class RequestStates
 public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestStore
 {
     private const string Table = "EDWUTIL.OPR.EdwJobGeneratorRequests";
-    private const string Columns = "RequestId,JobName,MIGPackageName,StgPackageName,StgFullInitialLoad,SkeyPackageName,LryPackageName,Sql1,EdwPackageName,Sql2,EdwdmPackageName,RequestedBy,RequestedAt,ExecutedBy,RunToken,ExecutedAt";
+    private const string Columns = "RequestId,JobName,MIGPackageName,StgPackageName,StgFullInitialLoad,SkeyPackageName,LryPackageName,Sql1,EdwPackageName,Sql2,EdwdmPackageName,RequestedBy,RequestedAt,ExecutedBy,RunToken,ExecutedAt,FinishedAt";
     private async Task<SqlConnection> Open(CancellationToken ct)
     {
         var settings = store.GetRequestSettings();
@@ -98,7 +100,7 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
                 SkeyPackageName = Text(r, "SkeyPackageName"), LryPackageName = Text(r, "LryPackageName"), Sql1 = Text(r, "Sql1"),
                 EdwPackageName = Text(r, "EdwPackageName"), Sql2 = Text(r, "Sql2"), EdwdmPackageName = Text(r, "EdwdmPackageName"),
                 RequestedBy = Text(r, "RequestedBy") ?? "", RequestedAt = Time(r, "RequestedAt")!.Value,
-                ExecutedBy = Text(r, "ExecutedBy"), RunToken = Text(r, "RunToken"), ExecutedAt = Time(r, "ExecutedAt")
+                ExecutedBy = Text(r, "ExecutedBy"), RunToken = Text(r, "RunToken"), ExecutedAt = Time(r, "ExecutedAt"), FinishedAt = Time(r, "FinishedAt")
             });
         return list;
     }
@@ -148,7 +150,7 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
             END
             IF @allowed = 1
             BEGIN
-                    UPDATE {Table} SET ExecutedBy = SUSER_SNAME(), RunToken = @token, ExecutedAt = SYSDATETIMEOFFSET()
+                    UPDATE {Table} SET ExecutedBy = SUSER_SNAME(), RunToken = @token, ExecutedAt = SYSDATETIMEOFFSET(), FinishedAt = NULL
                     WHERE RequestId = @id AND ISNULL(RunToken, '') = ISNULL(@current, '');
                     SET @result = @@ROWCOUNT;
             END
@@ -160,11 +162,21 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
         cmd.Parameters.Add("@previous", SqlDbType.VarChar, 50).Value = (object?)previousToken ?? DBNull.Value;
         return (ClaimResult)Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
     }
+    public async Task SaveFinishedAt(int id, string runToken, DateTimeOffset finishedAt, ConnectionInput employee, CancellationToken ct)
+    {
+        await using var db = agent.Connect(employee); await db.OpenAsync(ct);
+        await using var cmd = db.CreateCommand();
+        cmd.CommandText = $"UPDATE {Table} SET FinishedAt=@finished WHERE RequestId=@id AND RunToken=@token AND ExecutedBy = SUSER_SNAME() AND FinishedAt IS NULL;";
+        cmd.Parameters.Add("@id", SqlDbType.Int).Value = id;
+        cmd.Parameters.Add("@token", SqlDbType.VarChar, 50).Value = runToken;
+        cmd.Parameters.Add("@finished", SqlDbType.DateTimeOffset).Value = finishedAt;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
     public async Task Release(int id, string runToken, ConnectionInput employee, CancellationToken ct)
     {
         await using var db = agent.Connect(employee); await db.OpenAsync(ct);
         await using var cmd = db.CreateCommand();
-        cmd.CommandText = $"UPDATE {Table} SET ExecutedBy=NULL,RunToken=NULL,ExecutedAt=NULL WHERE RequestId=@id AND RunToken=@token;";
+        cmd.CommandText = $"UPDATE {Table} SET ExecutedBy=NULL,RunToken=NULL,ExecutedAt=NULL,FinishedAt=NULL WHERE RequestId=@id AND RunToken=@token;";
         cmd.Parameters.Add("@id", SqlDbType.Int).Value = id;
         cmd.Parameters.Add("@token", SqlDbType.VarChar, 50).Value = runToken;
         await cmd.ExecuteNonQueryAsync(ct);
@@ -185,6 +197,7 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
         var rows = string.Join(",", taken.Select((_, i) => $"(@id{i},@prefix{i})"));
         cmd.CommandText = $"""
             SELECT t.RequestId, j.name, a.start_execution_date,
+                TODATETIMEOFFSET(a.start_execution_date, DATEPART(TZOFFSET, SYSDATETIMEOFFSET())) AS started,
                 TODATETIMEOFFSET(a.stop_execution_date, DATEPART(TZOFFSET, SYSDATETIMEOFFSET())) AS stopped,
                 CASE WHEN a.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions) THEN 1 ELSE 0 END AS current_session,
                 h.run_status, h.message, s.step_id, s.step_name, l.JobCreationStatus, l.ErrorLog
@@ -216,14 +229,14 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
             if (r["run_status"] is not DBNull)
             {
                 var status = Convert.ToInt32(r["run_status"]) switch { 1 => "Succeeded", 3 => "Canceled", 0 => "Failed", _ => "Running" };
-                result[id] = new(status, Text(r, "message"), null, job, Time(r, "stopped"));
+                result[id] = new(status, Text(r, "message"), null, job, Time(r, "stopped"), Time(r, "started"));
             }
             else if (r["start_execution_date"] is DBNull)
                 result[id] = new("Starting", "Job oluşturuldu, Agent başlangıcı bekleniyor.", null, job, null);
             else if (r["stopped"] is DBNull && Convert.ToInt32(r["current_session"]) == 1)
-                result[id] = new("Running", "SQL Server Agent çalışması izleniyor.", lastStep is null ? null : "Son tamamlanan adım: " + lastStep, job, null);
+                result[id] = new("Running", "SQL Server Agent çalışması izleniyor.", lastStep is null ? null : "Son tamamlanan adım: " + lastStep, job, null, Time(r, "started"));
             else
-                result[id] = new("Unknown", "Agent çalışması durmuş görünüyor ancak sonuç kaydı bulunamadı.", null, job, Time(r, "stopped"));
+                result[id] = new("Unknown", "Agent çalışması durmuş görünüyor ancak sonuç kaydı bulunamadı.", null, job, Time(r, "stopped"), Time(r, "started"));
         }
     }
 }
@@ -256,9 +269,18 @@ public sealed class DemoRequestStore : IRequestStore
             var i = rows.FindIndex(r => r.RequestId == id);
             if (i < 0 || rows[i].RunToken != previousToken) return Task.FromResult(ClaimResult.Taken);
             var login = employee.IntegratedSecurity ? RequestStates.CurrentUser : employee.UserName;
-            rows[i] = rows[i] with { ExecutedBy = login, RunToken = runToken, ExecutedAt = DateTimeOffset.Now };
+            rows[i] = rows[i] with { ExecutedBy = login, RunToken = runToken, ExecutedAt = DateTimeOffset.Now, FinishedAt = null };
             return Task.FromResult(ClaimResult.Claimed);
         }
+    }
+    public Task SaveFinishedAt(int id, string runToken, DateTimeOffset finishedAt, ConnectionInput employee, CancellationToken ct)
+    {
+        lock (gate)
+        {
+            var i = rows.FindIndex(r => r.RequestId == id && r.RunToken == runToken && r.FinishedAt is null);
+            if (i >= 0) rows[i] = rows[i] with { FinishedAt = finishedAt };
+        }
+        return Task.CompletedTask;
     }
     public Task Release(int id, string runToken, ConnectionInput employee, CancellationToken ct)
     {
@@ -320,6 +342,18 @@ public sealed class RequestMonitor(Store store, IRequestStore requests, ILogger<
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { statusError = "Job durumu msdb'den okunamadı: " + ex.Message; }
             Requests = rows.Select(r => Resolve(r, r.RunToken is null ? null : local.GetValueOrDefault(r.RunToken), remote.GetValueOrDefault(r.RequestId))).ToList();
+            foreach (var row in Requests.Where(r => RequestStates.Final(r.Status) && r.RunToken is not null && r.FinishedAt is not null))
+            {
+                if (rows.First(r => r.RequestId == row.RequestId).FinishedAt is not null) continue;
+                if (!local.TryGetValue(row.RunToken!, out var run) || run.ConnectionSnapshot is null) continue;
+                try
+                {
+                    var employee = System.Text.Json.JsonSerializer.Deserialize<ConnectionInput>(run.ConnectionSnapshot, Store.Json)
+                        ?? throw new InvalidOperationException("Çalıştıran kullanıcının bağlantısı bulunamadı.");
+                    await requests.SaveFinishedAt(row.RequestId, row.RunToken!, row.FinishedAt!.Value, employee, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException) { statusError = "Bitiş zamanı kaydedilemedi: " + ex.Message; }
+            }
             Error = statusError; UpdatedUtc = DateTimeOffset.UtcNow;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -332,9 +366,9 @@ public sealed class RequestMonitor(Store store, IRequestStore requests, ILogger<
         if (row.ExecutedBy is null) return row with { Status = "Pending" };
         if (run is not null)
             return row with { Status = RequestStates.FromRun(run.Status), StatusMessage = run.Message, CurrentStep = run.CurrentStep,
-                AgentJobName = run.AgentJobName, FinishedAt = RunStates.Active(run.Status) ? null : run.FinishedUtc };
+                AgentJobName = run.AgentJobName, StartedAt = run.AgentStartedAt, FinishedAt = run.AgentFinishedAt ?? row.FinishedAt };
         if (agent is not null)
-            return row with { Status = agent.Status, StatusMessage = agent.Message, CurrentStep = agent.CurrentStep, AgentJobName = agent.AgentJobName, FinishedAt = agent.FinishedAt };
+            return row with { Status = agent.Status, StatusMessage = agent.Message, CurrentStep = agent.CurrentStep, AgentJobName = agent.AgentJobName, StartedAt = agent.StartedAt, FinishedAt = agent.FinishedAt ?? row.FinishedAt };
         if (DateTimeOffset.UtcNow - (row.ExecutedAt ?? row.RequestedAt) > TimeSpan.FromMinutes(2))
             return row with { Status = "Unknown", StatusMessage = "Çalışma etiketiyle oluşturulmuş Agent job'ı bulunamadı." };
         return row with { Status = "Starting", StatusMessage = "Job oluşturuluyor." };

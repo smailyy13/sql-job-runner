@@ -12,14 +12,63 @@ public class RequestTests
         public readonly DemoRequestStore Inner = new();
         public Dictionary<string, AgentStatus> Agent = new();
         public int StatusQueries;
+        public ConnectionInput? FinishConnection;
         public Task<List<JobRequest>> List(CancellationToken ct) => Inner.List(ct);
         public Task<int> Create(JobDefinition job, string by, CancellationToken ct) => Inner.Create(job, by, ct);
         public Task<ClaimResult> Claim(int id, string token, string? previous, ConnectionInput e, CancellationToken ct) => Inner.Claim(id, token, previous, e, ct);
+        public Task SaveFinishedAt(int id, string token, DateTimeOffset time, ConnectionInput employee, CancellationToken ct) { FinishConnection = employee; return Inner.SaveFinishedAt(id, token, time, employee, ct); }
         public Task Release(int id, string token, ConnectionInput e, CancellationToken ct) => Inner.Release(id, token, e, ct);
         public Task<Dictionary<int, AgentStatus>> Statuses(IReadOnlyList<JobRequest> taken, CancellationToken ct)
         { StatusQueries += taken.Count; return Task.FromResult(taken.Where(t => Agent.ContainsKey(t.RunToken!)).ToDictionary(t => t.RequestId, t => Agent[t.RunToken!])); }
     }
     private static Task<int> NewRequest(IRequestStore s) => s.Create(new JobDefinition { JobName = "J", Sql1 = "SELECT 1" }, "CORP\\consultant", default);
+    [Fact]
+    public async Task Finish_time_is_saved_and_stale_attempt_cannot_overwrite_retry()
+    {
+        var requests = new FakeAgentStore(); var id = await NewRequest(requests);
+        var employee = new ConnectionInput("DEMO", UserName: "runner", IntegratedSecurity: false, Password: "test-only");
+        var store = NewStore(); store.SetConnection(employee);
+        var run = store.Execute((await requests.List(default))[0].ToDefinition(), Guid.NewGuid().ToString(), id);
+        var token = GeneratorContract.Token(run);
+        await requests.Claim(id, token, null, employee, default);
+        var end = DateTimeOffset.UtcNow;
+        run.Status = "Succeeded"; run.AgentStartedAt = end.AddSeconds(-10); run.AgentFinishedAt = end;
+        store.SaveRun(run);
+        store.SetConnection(new("OTHER"));
+        var monitor = new RequestMonitor(store, requests, NullLogger<RequestMonitor>.Instance);
+        await monitor.Refresh(default);
+        Assert.Equal(end, (await requests.List(default))[0].FinishedAt);
+        Assert.Equal("runner", requests.FinishConnection!.UserName);
+        Assert.Equal("DEMO", requests.FinishConnection.Server);
+        await requests.Claim(id, "second", token, employee, default);
+        await requests.SaveFinishedAt(id, token, end, employee, default);
+        Assert.Null((await requests.List(default))[0].FinishedAt);
+    }
+    [Fact]
+    public async Task Observer_does_not_write_finish_time_using_shared_login()
+    {
+        var requests = new FakeAgentStore(); var id = await NewRequest(requests);
+        await requests.Claim(id, "remote", null, new("DEMO"), default);
+        requests.Agent["remote"] = new("Succeeded", null, null, "job", DateTimeOffset.UtcNow);
+        var monitor = new RequestMonitor(NewStore(), requests, NullLogger<RequestMonitor>.Instance);
+        await monitor.Refresh(default);
+        Assert.Null(requests.FinishConnection);
+        Assert.Null((await requests.List(default))[0].FinishedAt);
+    }
+
+    [Fact]
+    public void Request_times_use_agent_times_instead_of_claim_or_observation_time()
+    {
+        var start = DateTimeOffset.UtcNow.AddMinutes(-2);
+        var end = start.AddSeconds(15);
+        var row = new JobRequest { ExecutedBy = "employee", ExecutedAt = start.AddSeconds(-30) };
+        var local = new RunRecord { Status = "Succeeded", AgentStartedAt = start, AgentFinishedAt = end, FinishedUtc = end.AddSeconds(3) };
+        var resolved = RequestMonitor.Resolve(row, local, null);
+        Assert.Equal(start, resolved.StartedAt); Assert.Equal(end, resolved.FinishedAt);
+        var remote = RequestMonitor.Resolve(row, null, new AgentStatus("Succeeded", null, null, "job", end, start));
+        Assert.Equal(resolved.StartedAt, remote.StartedAt); Assert.Equal(resolved.FinishedAt, remote.FinishedAt);
+        Assert.Null(RequestMonitor.Resolve(row, local with { AgentStartedAt = null, AgentFinishedAt = null }, null).FinishedAt);
+    }
     [Fact]
     public void Different_requests_with_same_name_run_concurrently_but_same_request_is_blocked()
     {

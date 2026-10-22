@@ -34,6 +34,8 @@ public record RunRecord
     public string Status { get; set; } = "Queued";
     public DateTimeOffset CreatedUtc { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? FinishedUtc { get; set; }
+    public DateTimeOffset? AgentStartedAt { get; set; }
+    public DateTimeOffset? AgentFinishedAt { get; set; }
     public DateTime? ServerSubmittedAt { get; set; }
     public string? AgentJobId { get; set; }
     public string? AgentJobName { get; set; }

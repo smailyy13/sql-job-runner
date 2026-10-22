@@ -108,7 +108,9 @@ public sealed class AgentClient(Store store) : IAgentClient
         await using var cmd = db.CreateCommand();
         cmd.CommandText = """
             SELECT j.job_id, a.start_execution_date, a.stop_execution_date,
-                a.last_executed_step_id, a.session_id, (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+                a.last_executed_step_id, a.session_id, (SELECT MAX(session_id) FROM msdb.dbo.syssessions),
+                TODATETIMEOFFSET(a.start_execution_date, DATEPART(TZOFFSET, SYSDATETIMEOFFSET())),
+                TODATETIMEOFFSET(a.stop_execution_date, DATEPART(TZOFFSET, SYSDATETIMEOFFSET()))
             FROM msdb.dbo.sysjobs j OUTER APPLY
                 (SELECT TOP(1) * FROM msdb.dbo.sysjobactivity a WHERE a.job_id=j.job_id ORDER BY a.session_id DESC) a
             WHERE (@id IS NOT NULL AND j.job_id=@id) OR (@id IS NULL AND j.name=@name);
@@ -127,6 +129,7 @@ public sealed class AgentClient(Store store) : IAgentClient
         var stopped = !r.IsDBNull(2);
         var currentSession = !r.IsDBNull(4) && !r.IsDBNull(5) && r.GetInt32(4) == r.GetInt32(5);
         var matches = started.HasValue && started.Value >= submittedSecond;
+        if (matches) { run.AgentStartedAt = r.IsDBNull(6) ? null : r.GetFieldValue<DateTimeOffset>(6); run.AgentFinishedAt = r.IsDBNull(7) ? null : r.GetFieldValue<DateTimeOffset>(7); }
         await r.DisposeAsync();
         // sp_help_job exposes Agent's current step (last_executed_step_id + 1 is incorrect for branching jobs).
         if (matches && !stopped && currentSession)
