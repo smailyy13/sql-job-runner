@@ -23,7 +23,7 @@ public sealed class JobWorker(Store store, IAgentClient agent, ILogger<JobWorker
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex) { logger.LogError(ex, "Job worker döngüsü tamamlanamadı"); }
-            try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
+            try { await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
     }

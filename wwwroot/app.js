@@ -17,8 +17,10 @@ const stored = {get:key => { try { return localStorage.getItem(key); } catch { r
 document.documentElement.dataset.theme = localStorage.getItem('jobRunnerTheme') || 'light';
 function desktopNotify(body,onclick) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const notice = new Notification('SQL Job Runner',{body});
-  notice.onclick = () => { window.focus(); onclick?.(); notice.close(); };
+  try {
+    const notice = new Notification('SQL Job Runner',{body});
+    notice.onclick = () => { window.focus(); onclick?.(); notice.close(); };
+  } catch { /* The in-app toast still announces the request. */ }
 }
 // Ask once when the site opens; browsers that require a user gesture get asked on the first click instead.
 async function setupDesktopNotifications() {
@@ -35,15 +37,18 @@ function showRequest(id) {
   document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active',b.dataset.view === 'requests'));
   renderTable(); renderDetail();
 }
-// Requests from others that arrived since this browser last looked; the first visit only records the baseline.
+// Announce new requests from other users; the first visit records the baseline.
 function announceRequests() {
   if (!state.requests) return;
   const latestId = Math.max(0,...state.requests.map(r => r.requestId));
   const seen = stored.get('jobRunnerSeenRequest');
   if (seen !== null) {
     const fresh = state.requests.filter(r => r.requestId > Number(seen) && r.requestedBy !== state.currentUser);
-    if (fresh.length === 1) { toast(`${t('Yeni istek')}: ${fresh[0].jobName}`); desktopNotify(`${t('Yeni istek')}: ${fresh[0].jobName} (${fresh[0].requestedBy})`,() => showRequest(fresh[0].requestId)); }
-    else if (fresh.length > 1) { toast(`${fresh.length} ${t('yeni istek')}`); desktopNotify(`${fresh.length} ${t('yeni istek')}`,() => showRequest(fresh[0].requestId)); }
+    for (const request of fresh) {
+      const body = `${t('Yeni istek')}: ${request.jobName} (${request.requestedBy})`;
+      toast(`${t('Yeni istek')}: ${request.jobName}`);
+      desktopNotify(body,() => showRequest(request.requestId));
+    }
   }
   if (seen === null || latestId > Number(seen)) stored.set('jobRunnerSeenRequest',String(latestId));
 }
@@ -93,32 +98,63 @@ function render() {
   $('connectionLabel').textContent = state.connection?.server || t('Bağlantı seçin');
   if($('jobDialog').open) $('executionTarget').textContent=t('İstek tabloya kaydedilir; çalıştırılmaz.');
   const requests = state.requests || [];
-  $('totalCount').textContent = requests.length;
-  $('pendingCount').textContent = requests.filter(r => r.status === 'Pending').length;
+  $('totalCount').textContent = requests.filter(r => r.status === 'Pending').length;
   $('activeCount').textContent = requests.filter(r => requestActive(r.status) && r.status !== 'Unknown').length;
-  $('successCount').textContent = requests.filter(r => r.status === 'Succeeded').length;
-  $('attentionCount').textContent = requests.filter(r => ['Failed','Unknown','Canceled'].includes(r.status)).length;
+  $('attentionCount').textContent = requests.filter(r => r.status === 'Failed').length;
   $('unreadCount').textContent = state.notifications.filter(n => !n.read).length;
   renderTable(); renderDetail();
   if ($('notificationDialog').open) renderNotifications();
 }
-function renderRequests() {
+const requestTime = r => Date.parse(r.executedAt || r.requestedAt) || 0;
+const sameJob = (a,b) => a.trim().toLocaleUpperCase('en') === b.trim().toLocaleUpperCase('en');
+// Another request for the same job is running; the server refuses a second run as well.
+const rerunnable = request => ['Failed','Canceled'].includes(request.status);
+function runAction(r) {
+  if (r.status !== 'Pending' && !rerunnable(r)) return `<button class="btn" data-action="detail">${t("Detay")}</button>`;
+  return `<button class="btn primary" data-action="run-request" data-request="${esc(String(r.requestId))}">${t(r.status === 'Pending' ? "▷ Çalıştır" : "↻ Tekrar çalıştır")}</button>`;
+}
+
+function requestDuration(r) {
+  if (!r.executedAt) return '—';
+  return duration({createdUtc:r.executedAt,finishedUtc:requestActive(r.status) ? null : r.finishedAt || null});
+}
+function filteredRequests(rows) {
   const filter = $('statusFilter').value, query = $('search').value.toLocaleLowerCase('tr');
-  const rows = (state.requests || []).filter(r => JSON.stringify(r).toLocaleLowerCase('tr').includes(query) && (!filter || (filter === 'active' ? requestActive(r.status) : r.status === filter)));
-  $('tableHead').innerHTML = `<tr><th>#</th><th>${t("Job adı")}</th><th>${t("İsteyen")}</th><th>${t("İstek zamanı")}</th><th>${t("Durum")}</th><th>${t("Aktif adım")}</th><th>${t("İşlemler")}</th></tr>`;
+  return rows.filter(r => JSON.stringify(r).toLocaleLowerCase('tr').includes(query) && (!filter || (filter === 'active' ? requestActive(r.status) : r.status === filter)));
+}
+// Every request in the table, most recent activity first.
+function renderHistory() {
+  const rows = filteredRequests(state.requests || []).sort((a,b) => requestTime(b) - requestTime(a) || b.requestId - a.requestId);
+  $('tableHead').innerHTML = `<tr><th>#</th><th>${t("Job adı")}</th><th>${t("Kullanıcı etiketi")}</th><th>${t("Durum")}</th><th>${t("İsteyen")}</th><th>${t("Çalıştıran")}</th><th>${t("İstek zamanı")}</th><th>${t("Başlangıç")}</th><th>${t("Süre")}</th><th>${t("İşlemler")}</th></tr>`;
   $('tableBody').innerHTML = rows.map(r => {
     const id = String(r.requestId);
     return `<tr data-kind="request" data-id="${esc(id)}" tabindex="0" class="${selection?.kind === 'request' && selection.id === id ? 'selected' : ''}">
-      <td class="job-name">${esc(id)}</td><td><div class="job-name">${esc(r.jobName)}</div>${r.agentJobName ? `<div class="job-sub">${esc(r.agentJobName)}</div>` : ''}</td><td>${esc(r.requestedBy)}</td>
-      <td>${clock(r.requestedAt)}</td><td>${badge(r.status)}</td><td>${esc(message(r.currentStep || '—'))}</td>
-      <td><div class="row-actions">${r.status === 'Pending' ? `<button class="btn primary" data-action="run-request" data-request="${esc(id)}">${t("▷ Çalıştır")}</button>` : `<button class="btn" data-action="detail">${t("Detay")}</button>`}</div></td></tr>`;
+      <td class="job-name">${esc(id)}</td><td><div class="job-name">${esc(r.agentJobName || r.jobName)}</div></td><td>${esc(r.jobName)}</td><td>${badge(r.status)}</td>
+      <td>${esc(r.requestedBy)}</td><td>${esc(r.executedBy || '—')}</td><td>${clock(r.requestedAt)}</td><td>${clock(r.executedAt)}</td><td class="job-name">${requestDuration(r)}</td><td><div class="row-actions">${runAction(r)}</div></td></tr>`;
   }).join('');
   $('emptyState').hidden = rows.length > 0;
   $('emptyState').querySelector('h2').textContent = state.requests?.length ? t('Kayıt bulunamadı.') : t('Henüz istek yok.');
   $('rowCount').textContent = `${rows.length} ${t("kayıt")}`;
 }
+// Only requests waiting to be run or currently running; finished ones are in the history.
+function renderRequests() {
+  const open = (state.requests || []).filter(r => r.status === 'Pending' || requestActive(r.status));
+  const rows = filteredRequests(open);
+  $('tableHead').innerHTML = `<tr><th>#</th><th>${t("Job adı")}</th><th>${t("Kullanıcı etiketi")}</th><th>${t("İsteyen")}</th><th>${t("İstek zamanı")}</th><th>${t("Durum")}</th><th>${t("Aktif adım")}</th><th>${t("İşlemler")}</th></tr>`;
+  $('tableBody').innerHTML = rows.map(r => {
+    const id = String(r.requestId);
+    return `<tr data-kind="request" data-id="${esc(id)}" tabindex="0" class="${selection?.kind === 'request' && selection.id === id ? 'selected' : ''}">
+      <td class="job-name">${esc(id)}</td><td><div class="job-name">${esc(r.agentJobName || r.jobName)}</div></td><td>${esc(r.jobName)}</td><td>${esc(r.requestedBy)}</td>
+      <td>${clock(r.requestedAt)}</td><td>${badge(r.status)}</td><td>${esc(message(r.currentStep || '—'))}</td>
+      <td><div class="row-actions">${runAction(r)}</div></td></tr>`;
+  }).join('');
+  $('emptyState').hidden = rows.length > 0;
+  $('emptyState').querySelector('h2').textContent = open.length ? t('Kayıt bulunamadı.') : t('Bekleyen veya çalışan istek yok.');
+  $('rowCount').textContent = `${rows.length} ${t("kayıt")}`;
+}
 function renderTable() {
   if (view === 'requests') return renderRequests();
+  if (view === 'history') return renderHistory();
   const filter = $('statusFilter').value, query = $('search').value.toLocaleLowerCase('tr');
   let rows = view === 'jobs' ? state.jobs.map(job => ({job,run:latest(job.id),status:jobStatus(job)})) : state.runs.map(run => ({job:run.definition,run,status:run.status}));
   rows.sort((a,b) => (Date.parse(b.run?.createdUtc) || 0) - (Date.parse(a.run?.createdUtc) || 0));
@@ -148,7 +184,7 @@ function chosen() {
 }
 function renderDetail() {
   const {run,job,request} = chosen();
-  $('detailTitle').textContent = job?.jobName || t('Job detayları');
+  $('detailTitle').textContent = request ? request.agentJobName || request.jobName : job?.jobName || t('Job detayları');
   if (!job) { $('detailBody').innerHTML = `<div class="detail-placeholder">${t("Bir kayıt seçin.")}</div>`; return; }
   if (request && detailTab !== 'parameters' && !(run && detailTab === 'steps')) return renderRequestDetail(request,run);
   if (detailTab === 'parameters') { $('detailBody').innerHTML = `<pre class="code">${esc(script(job,run))}</pre>`; return; }
@@ -169,8 +205,8 @@ function renderDetail() {
 function renderRequestDetail(request,run) {
   if (detailTab === 'steps') { $('detailBody').innerHTML = `${request.currentStep ? `<div class="message-box">${esc(message(request.currentStep))}</div>` : ''}<div class="detail-placeholder">${t("Adım ayrıntıları isteği çalıştıran bilgisayarda görünür.")}</div>`; return; }
   if (detailTab === 'logs') { $('detailBody').innerHTML = `<pre class="code">${esc(`[${clock(request.requestedAt)}] ${t("İstek oluşturuldu.")} ${request.requestedBy}\n${request.executedAt ? `[${clock(request.executedAt)}] ${t("Çalıştıran")}: ${request.executedBy || '—'}\n` : ''}${t("Durum")}: ${t(labels[request.status] || request.status)}\n\n${message(request.statusMessage || '')}`)}</pre>`; return; }
-  const entries = [[t('Durum'),badge(request.status)],[t('İsteyen'),esc(request.requestedBy)],[t('İstek zamanı'),clock(request.requestedAt)],[t('Çalıştıran'),esc(request.executedBy || '—')],['Agent job',esc(request.agentJobName || '—')],[t('Başlangıç'),clock(request.executedAt)],[t('Bitiş'),clock(request.finishedAt)],[t('Aktif adım'),esc(message(request.currentStep || '—'))]];
-  $('detailBody').innerHTML = `<div class="detail-grid">${entries.map(([label,value]) => `<div><label>${label}</label><div class="detail-value">${value}</div></div>`).join('')}</div>${request.statusMessage && ['Failed','Unknown','Unverified','Canceled'].includes(request.status) ? `<div class="message-box warning">${esc(message(request.statusMessage))}</div>` : ''}${request.status === 'Pending' ? `<button class="btn primary sm close-tracking" id="runRequestBtn">${t("▷ Çalıştır")}</button>` : ''}${run?.status === 'Unknown' ? `<button class="btn sm close-tracking" id="closeTrackingBtn">${t("İzlemeyi kapat")}</button>` : ''}`;
+  const entries = [[t('Durum'),badge(request.status)],[t('İsteyen'),esc(request.requestedBy)],[t('İstek zamanı'),clock(request.requestedAt)],[t('Çalıştıran'),esc(request.executedBy || '—')],[t('Job adı'),esc(request.agentJobName || request.jobName)],[t('Kullanıcı etiketi'),esc(request.jobName)],[t('Başlangıç'),clock(request.executedAt)],[t('Bitiş'),clock(request.finishedAt)],[t('Aktif adım'),esc(message(request.currentStep || '—'))]];
+  $('detailBody').innerHTML = `<div class="detail-grid">${entries.map(([label,value]) => `<div><label>${label}</label><div class="detail-value">${value}</div></div>`).join('')}</div>${request.statusMessage && ['Failed','Unknown','Unverified','Canceled'].includes(request.status) ? `<div class="message-box warning">${esc(message(request.statusMessage))}</div>` : ''}${request.status === 'Pending' || rerunnable(request) ? `<button class="btn primary sm close-tracking" id="runRequestBtn" >${t(request.status === 'Pending' ? "▷ Çalıştır" : "↻ Tekrar çalıştır")}</button>}` : ''}${run?.status === 'Unknown' ? `<button class="btn sm close-tracking" id="closeTrackingBtn">${t("İzlemeyi kapat")}</button>` : ''}`;
   if ($('runRequestBtn')) $('runRequestBtn').onclick = () => runRequest(request);
   if ($('closeTrackingBtn')) $('closeTrackingBtn').onclick = () => confirmAction(t('İzlemeyi kapat'),t('SQL Server Agent üzerindeki gerçek job durdurulmaz. İzleme sonlandırılır ve yeni çalıştırma kilidi kaldırılır. Yeniden çalıştırmadan önce Agent durumunu kontrol edin.'),request.jobName,t('İzlemeyi kapat'),async () => { await api(`/api/runs/${run.id}/close-tracking`,'POST'); toast(t('İzleme kapatıldı. Job sonucu doğrulanmadı.')); });
 }
@@ -181,7 +217,8 @@ function runRequest(request) {
     connectionStatus(t('İsteği çalıştırmak için SQL Server bağlantısı gerekli.'));
     return;
   }
-  confirmAction(t('İsteği çalıştır'),t('İstek şimdi çalıştırılsın mı?'),`${t("Sunucu: ")}${state.connection?.server}\nJob: ${request.jobName}\n${t("İsteyen")}: ${request.requestedBy}`,t('Çalıştır'),async () => {
+  const again = request.status !== 'Pending';
+  confirmAction(t(again ? 'İsteği tekrar çalıştır' : 'İsteği çalıştır'),t(again ? 'Önceki deneme başarısız oldu. İstek tekrar çalıştırılsın mı?' : 'İstek şimdi çalıştırılsın mı?'),`${t("Sunucu: ")}${state.connection?.server}\nJob: ${request.jobName}\n${t("İsteyen")}: ${request.requestedBy}`,t('Çalıştır'),async () => {
     try { await api(`/api/requests/${request.requestId}/run`,'POST',{requestId:newRequestId()}); }
     catch (error) {
       if (!error.data?.needsConnection) throw error;
@@ -328,6 +365,11 @@ $('settingsForm').onsubmit = async event => {
   } catch (error) { settingsStatus(error.message,'error'); }
   finally { $('settingsSaveBtn').disabled = false; }
 };
+$('notificationDialog').addEventListener('click', event => {
+  if (event.target !== $('notificationDialog')) return;
+  const rect = $('notificationDialog').getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('notificationDialog').close();
+});
 $('notificationsBtn').onclick = () => { renderNotifications(); $('notificationDialog').showModal(); };
 $('enableNotificationsBtn').onclick = async () => { if (!('Notification' in window)) return toast(t('Bildirimler desteklenmiyor.')); const permission = await Notification.requestPermission(); toast(permission === 'granted' ? t('Bildirimler açıldı.') : t('Bildirim izni verilmedi.')); };
 $('readNotificationsBtn').onclick = async () => { try { await api('/api/notifications/read','POST'); await refresh(); } catch(error) { toast(error.message); } };

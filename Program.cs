@@ -107,17 +107,18 @@ app.MapPost("/api/requests/{id:int}/run", async (int id, RunRequestInput input, 
         return Results.Json(new { error = "İsteği çalıştırmak için önce SQL Server'a bağlanın.", needsConnection = true }, statusCode: 409);
     await monitor.Refresh(ct);
     var request = monitor.Requests.SingleOrDefault(r => r.RequestId == id) ?? throw new InvalidOperationException("İstek bulunamadı.");
-    if (request.ExecutedBy is not null) throw new InvalidOperationException("Bu istek başka bir kullanıcı tarafından alınmış veya çalıştırılmış.");
+    // Waiting requests run; finished attempts that failed or were canceled may run again. Running ones never.
+    if (request.ExecutedBy is not null && !RequestStates.Rerunnable(request.Status))
+        throw new InvalidOperationException("Bu istek başka bir kullanıcı tarafından alınmış veya çalıştırılmış.");
     if (!Guid.TryParse(input.RequestId, out var runGuid)) throw new ArgumentException("Geçersiz çalışma isteği.");
     var job = request.ToDefinition() with { JobName = request.JobName.Trim() };
     GeneratorContract.Validate(job);
-    if (store.HasActiveRun(job.JobName)) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
     // The run token is known before the run starts, so anyone can later find the generated job in msdb.
     var token = GeneratorContract.Token(new RunRecord { Id = runGuid.ToString("N"), Definition = job });
-    bool claimed;
-    try { claimed = await requests.Claim(id, token, employee, ct); }
+    ClaimResult claim;
+    try { claim = await requests.Claim(id, token, request.RunToken, employee, ct); }
     catch (Microsoft.Data.SqlClient.SqlException ex) { return Results.BadRequest(new { error = "İstek alınamadı: " + ex.Message }); }
-    if (!claimed) throw new InvalidOperationException("Bu istek başka bir kullanıcı tarafından alınmış veya çalıştırılmış.");
+    if (claim != ClaimResult.Claimed) throw new InvalidOperationException("Bu istek başka bir kullanıcı tarafından alınmış veya çalıştırılmış.");
     RunRecord run;
     try { run = store.Execute(job, input.RequestId, id); }
     catch { await requests.Release(id, token, employee, CancellationToken.None); throw; }

@@ -12,6 +12,8 @@ const json = (body,status = 200) => ({ok:status < 400,status,json:async () => bo
 w.HTMLDialogElement.prototype.showModal = function() { this.setAttribute('open',''); };
 w.HTMLDialogElement.prototype.close = function() { this.removeAttribute('open'); };
 w.setInterval = () => 0; w.setTimeout = () => 0;
+const notices = [];
+w.Notification = class { static permission = 'granted'; static async requestPermission() { return 'granted'; } constructor(title,options) { notices.push(options.body); } close() {} };
 w.fetch = async (url,options = {}) => {
   requests.push({url,options});
   if (url === '/api/demo/cases') return json([{name:'DEMO_SUCCESS',title:'Success',description:'Three steps'}]);
@@ -78,7 +80,7 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   assert.equal(sent.sql2,"UPDATE EDW.CMP.LKPPushPayloadType SET EdwValidFrom = '2010-01-01'");
   assert.ok(!d.getElementById('jobDialog').open);
   assert.equal(posts('/api/jobs/execute'),0,'sending a request must not run it');
-  assert.equal(d.getElementById('totalCount').textContent,'1'); assert.equal(d.getElementById('pendingCount').textContent,'1');
+  assert.equal(d.getElementById('totalCount').textContent,'1'); assert.equal(d.querySelectorAll('.counts > span').length,3);
   assert.ok(runButton(1),'pending request can be run');
   d.querySelector('[data-tab="parameters"]').click(); assert.ok(d.getElementById('detailBody').textContent.includes("''2010-01-01''"));
   d.querySelector('[data-tab="summary"]').click();
@@ -91,7 +93,14 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   await w.refreshForTest();
   assert.equal(d.getElementById('toast').textContent,'Yeni istek: OtherJob');
   assert.equal(w.localStorage.getItem('jobRunnerSeenRequest'),'2');
-  console.log('PASS: new request notification and seen baseline');
+  const beforeOwn = notices.length;
+  state.requests.push({requestId:99,jobName:'OwnRequest',requestedBy:state.currentUser,status:'Pending'});
+  await w.refreshForTest();
+  assert.equal(notices.length,beforeOwn,'own requests do not send desktop notifications');
+  await w.refreshForTest(); assert.equal(notices.length,beforeOwn,'no duplicate desktop notification');
+  state.requests = state.requests.filter(r => r.requestId !== 99);
+  w.localStorage.setItem('jobRunnerSeenRequest','2');
+  console.log('PASS: new request desktop notification excluding own requests and seen baseline');
 
   // First run in a session asks for a connection, then continues to the run confirmation.
   runButton(1).click(); await settle();
@@ -127,6 +136,27 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   d.getElementById('confirmYes').click(); await settle(5);
   assert.ok(d.getElementById('connectionDialog').open,'expired session asks for a connection');
   d.getElementById('connectionDialog').close();
+  // A second request for a job that is already running cannot be started.
+  state.requests.unshift({requestId:4,jobName:' TPESATY_lkppushpayloadtype ',sql1:'SELECT 1',requestedBy:'CORP\\consultant',requestedAt:new Date().toISOString(),status:'Pending'});
+  await w.refreshForTest(); assert.ok(!runButton(4).disabled,'different requests may share a job name');
+  // Requests tab: waiting and running only. History: every row, most recent activity first.
+  state.requests.find(r => r.requestId === 2).status = 'Succeeded';
+  await w.refreshForTest();
+  const shown = () => [...d.querySelectorAll('#tableBody tr')].map(tr => tr.dataset.id);
+  assert.deepEqual(shown().sort(),['1','3','4']);
+  state.requests.find(r => r.requestId === 1).executedAt = new Date(Date.now() + 60000).toISOString();
+  await w.refreshForTest(); d.querySelector('[data-view="history"]').click();
+  assert.deepEqual(shown(),['1','4','3','2']);
+  assert.ok(d.getElementById('tableHead').textContent.includes('Çalıştıran'));
+  // Failed attempts can be run again from the history; running and succeeded ones cannot.
+  assert.equal(runButton(2),null); assert.equal(runButton(1),null);
+  state.requests.find(r => r.requestId === 2).status = 'Failed'; await w.refreshForTest();
+  assert.equal(runButton(2).textContent,'↻ Tekrar çalıştır'); assert.ok(!runButton(2).disabled);
+  runButton(2).click(); await settle();
+  assert.ok(d.getElementById('confirmDialog').open); assert.ok(d.getElementById('confirmText').textContent.includes('Önceki deneme'));
+  d.getElementById('confirmDialog').close();
+  d.querySelector('[data-view="requests"]').click();
+  console.log('PASS: shared job names, requests tab shows waiting/running, history shows all newest first');
   console.log('PASS: connection required once per session, recent connections, auth rows, password clearing, no database field');
 
   // Settings: request server is editable, defaults to SRVDEV\PASIFIK, and reports an unreachable server.

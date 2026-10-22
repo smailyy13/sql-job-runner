@@ -103,13 +103,13 @@ public sealed class Store
                 return prior;
             }
             var connection=GetConnection() ?? throw new InvalidOperationException("Önce SQL Server bağlantısını kurun.");
-            var sameName=Jobs().FirstOrDefault(j=>j.JobName.Equals(job.JobName,StringComparison.OrdinalIgnoreCase));
+            var sameName=jobRequestId is null ? Jobs().FirstOrDefault(j=>j.JobName.Equals(job.JobName,StringComparison.OrdinalIgnoreCase)) : null;
             if(sameName is not null && sameName.Id!=job.Id)
             {
                 if(Jobs().Any(j=>j.Id==job.Id)) throw new InvalidOperationException("Bu job adı zaten kayıtlı.");
                 job=job with {Id=sameName.Id};
             }
-            if(Runs().Any(r=>r.JobId==job.Id && RunStates.Active(r.Status))) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
+            if(Runs().Any(r=>RunStates.Active(r.Status) && (jobRequestId is null ? r.JobId==job.Id : r.RequestId==jobRequestId))) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
             var run=new RunRecord {Id=id,JobId=job.Id,Definition=job,ConnectionSnapshot=JsonSerializer.Serialize(connection,Json),RequestId=jobRequestId};
             using var db=Open();using var tx=db.BeginTransaction();using var cmd=db.CreateCommand();cmd.Transaction=tx;
             cmd.CommandText="INSERT INTO jobs(id,body) VALUES($id,$body) ON CONFLICT(id) DO UPDATE SET body=excluded.body";
