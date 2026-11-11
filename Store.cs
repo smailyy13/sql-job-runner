@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
@@ -26,6 +26,26 @@ public sealed class Store
         requestDefaults = new RequestSettings(
             string.IsNullOrWhiteSpace(config["Requests:Server"]) ? RequestSettings.DefaultServer : config["Requests:Server"]!,
             config.GetValue("Requests:Encrypt", false), config.GetValue("Requests:TrustServerCertificate", true));
+        // Migrate the previous development default once; later explicit environment choices are retained.
+        Execute(db, "CREATE TABLE IF NOT EXISTS local_migrations(name TEXT PRIMARY KEY);");
+        using var migration = db.CreateCommand();
+        migration.CommandText = "SELECT COUNT(*) FROM local_migrations WHERE name='production-default-v1'";
+        if (Convert.ToInt32(migration.ExecuteScalar()) == 0)
+        {
+            var saved = All<RequestSettings>("app_settings").SingleOrDefault();
+            using var tx = db.BeginTransaction();
+            if (requestDefaults.Server.Equals("PASIFIK", StringComparison.OrdinalIgnoreCase)
+                && saved?.Server.Equals(@"SRVDEV\PASIFIK", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                using var update = db.CreateCommand(); update.Transaction = tx;
+                update.CommandText = "UPDATE app_settings SET body=$body WHERE id='requests'";
+                update.Parameters.AddWithValue("$body", JsonSerializer.Serialize(saved with { Server = "PASIFIK" }, Json));
+                update.ExecuteNonQuery();
+            }
+            using var mark = db.CreateCommand(); mark.Transaction = tx;
+            mark.CommandText = "INSERT INTO local_migrations(name) VALUES('production-default-v1')";
+            mark.ExecuteNonQuery(); tx.Commit();
+        }
     }
     private readonly RequestSettings requestDefaults;
     // Saved from the Settings dialog; until then appsettings.json, then the built-in default.
@@ -87,7 +107,7 @@ public sealed class Store
             Save("jobs", job.Id, job);
         }
     }
-    public RunRecord Execute(JobDefinition job,string requestId,int? jobRequestId=null)
+    public RunRecord Execute(JobDefinition job,string requestId,int? jobRequestId=null,ConnectionInput? executionConnection=null)
     {
         lock(gate)
         {
@@ -102,14 +122,14 @@ public sealed class Store
                     throw new InvalidOperationException("Bu çalışma isteği farklı bir EXEC için kullanılmış. Yeni job penceresi açın.");
                 return prior;
             }
-            var connection=GetConnection() ?? throw new InvalidOperationException("Önce SQL Server bağlantısını kurun.");
+            var connection=executionConnection ?? (jobRequestId.HasValue ? GetExecutionConnection() : GetConnection()) ?? throw new InvalidOperationException("Önce SQL Server bağlantısını kurun.");
             var sameName=jobRequestId is null ? Jobs().FirstOrDefault(j=>j.JobName.Equals(job.JobName,StringComparison.OrdinalIgnoreCase)) : null;
             if(sameName is not null && sameName.Id!=job.Id)
             {
                 if(Jobs().Any(j=>j.Id==job.Id)) throw new InvalidOperationException("Bu job adı zaten kayıtlı.");
                 job=job with {Id=sameName.Id};
             }
-            if(Runs().Any(r=>RunStates.Active(r.Status) && (jobRequestId is null ? r.JobId==job.Id : r.RequestId==jobRequestId))) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
+            if(Runs().Any(r=>jobRequestId is null ? r.JobId==job.Id && RunStates.Active(r.Status) : r.RequestId==jobRequestId)) throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
             var run=new RunRecord {Id=id,JobId=job.Id,Definition=job,ConnectionSnapshot=JsonSerializer.Serialize(connection,Json),RequestId=jobRequestId};
             using var db=Open();using var tx=db.BeginTransaction();using var cmd=db.CreateCommand();cmd.Transaction=tx;
             cmd.CommandText="INSERT INTO jobs(id,body) VALUES($id,$body) ON CONFLICT(id) DO UPDATE SET body=excluded.body";
@@ -131,6 +151,7 @@ public sealed class Store
         lock (gate)
         {
             var job = Jobs().SingleOrDefault(j => j.Id == id) ?? throw new InvalidOperationException("Job bulunamadı.");
+            if (Runs().Any(r => r.JobId == id && r.RequestId is not null)) throw new InvalidOperationException("Bu istek daha önce çalıştırılmış. Her istek yalnızca bir kez çalıştırılabilir.");
             if (Runs().Any(r => RunStates.Active(r.Status) && r.JobId == job.Id))
                 throw new InvalidOperationException("Bu job için aktif veya durumu belirsiz bir çalışma var.");
             var connection = GetConnection() ?? throw new InvalidOperationException("Önce bağlantıyı kaydedin.");
@@ -167,6 +188,18 @@ public sealed class Store
     public ConnectionInput? GetConnection()
     {
         lock(gate) { var c=All<ConnectionInput>("settings").SingleOrDefault();return c is null?null:c with {Database=ConnectionDefaults.Database}; }
+    }
+    public ConnectionInput GetExecutionConnection()
+    {
+        lock (gate)
+        {
+            var settings = GetRequestSettings();
+            var saved = GetConnection();
+            var connection = saved is not null && saved.Server.Equals(settings.Server, StringComparison.OrdinalIgnoreCase)
+                ? saved : new ConnectionInput(Server: settings.Server);
+            return connection with { Server = settings.Server, Encrypt = settings.Encrypt,
+                TrustServerCertificate = settings.TrustServerCertificate, Database = ConnectionDefaults.Database };
+        }
     }
     // The database is fixed, so records saved under an older default share the same id.
     public static string ConnectionId(ConnectionInput c) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{c.Server.ToUpperInvariant()}|{ConnectionDefaults.Database.ToUpperInvariant()}|{c.IntegratedSecurity}|{c.UserName.ToUpperInvariant()}")))[..24];

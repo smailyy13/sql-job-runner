@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
 
 namespace SqlJobRunner;
@@ -29,6 +29,7 @@ public record JobRequest
     public string? AgentJobName { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? FinishedAt { get; init; }
+    public bool IsImported => ImportedExecution.Parse(RunToken) is not null;
     public JobDefinition ToDefinition() => new()
     {
         JobName = JobName, MIGPackageName = MIGPackageName, StgPackageName = StgPackageName, StgFullInitialLoad = StgFullInitialLoad,
@@ -37,14 +38,14 @@ public record JobRequest
     };
 }
 public record AgentStatus(string Status, string? Message, string? CurrentStep, string? AgentJobName, DateTimeOffset? FinishedAt, DateTimeOffset? StartedAt = null);
-public record RunRequestInput(string RequestId);
+public record RunRequestInput(string RequestId, string? AuthorizationToken = null);
 
 public interface IRequestStore
 {
     Task<List<JobRequest>> List(CancellationToken ct);
     Task<int> Create(JobDefinition job, string requestedBy, CancellationToken ct);
-    // Atomically takes a request with the employee's own connection: a waiting one (previousToken null) or one whose
-    // previous attempt (previousToken) failed or was canceled.
+    Task<bool> DeletePending(int id, CancellationToken ct);
+    // Atomically takes a never-run request with the employee's own connection.
     Task<ClaimResult> Claim(int id, string runToken, string? previousToken, ConnectionInput employee, CancellationToken ct);
     Task SaveFinishedAt(int id, string runToken, DateTimeOffset finishedAt, ConnectionInput employee, CancellationToken ct);
     Task Release(int id, string runToken, ConnectionInput employee, CancellationToken ct);
@@ -60,13 +61,11 @@ public static class RequestStates
     public static bool Final(string status) => status is "Succeeded" or "Failed" or "Canceled";
     // A job is running somewhere; a second request for the same job must wait.
     public static bool Busy(string status) => status is "Queued" or "Starting" or "Running";
-    // A finished attempt that did not succeed can be run again with the same request.
-    public static bool Rerunnable(string status) => status is "Failed" or "Canceled";
     public static bool SameJob(string a, string b) => string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
     public static string CurrentUser => $"{Environment.UserDomainName}\\{Environment.UserName}";
 }
 
-public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestStore
+public sealed partial class SqlRequestStore(Store store, AgentClient agent) : IRequestStore
 {
     private const string Table = "EDWUTIL.OPR.EdwJobGeneratorRequests";
     private const string Columns = "RequestId,JobName,MIGPackageName,StgPackageName,StgFullInitialLoad,SkeyPackageName,LryPackageName,Sql1,EdwPackageName,Sql2,EdwdmPackageName,RequestedBy,RequestedAt,ExecutedBy,RunToken,ExecutedAt,FinishedAt";
@@ -104,6 +103,18 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
             });
         return list;
     }
+    public async Task<bool> DeletePending(int id, CancellationToken ct)
+    {
+        await using var db = await Open(ct);
+        await using var cmd = db.CreateCommand();
+        cmd.CommandText = $"""
+            DELETE FROM {Table}
+            WHERE RequestId=@RequestId AND ExecutedBy IS NULL AND RunToken IS NULL;
+            SELECT @@ROWCOUNT;
+            """;
+        cmd.Parameters.Add("@RequestId", SqlDbType.Int).Value = id;
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) == 1;
+    }
     public async Task<int> Create(JobDefinition j, string requestedBy, CancellationToken ct)
     {
         await using var db = await Open(ct);
@@ -128,34 +139,10 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
         await using var db = agent.Connect(employee); await db.OpenAsync(ct);
         await using var cmd = db.CreateCommand();
         cmd.CommandText = $"""
-            SET XACT_ABORT ON;
-            DECLARE @result INT = 0, @found BIT = 0, @current VARCHAR(50), @allowed BIT = 0;
-            BEGIN TRAN;
-            SELECT @found = 1, @current = RunToken FROM {Table} WITH (UPDLOCK) WHERE RequestId = @id;
-            -- The request must still be in the state the employee saw: waiting, or the same failed attempt.
-            IF @found = 1 AND ((@current IS NULL AND @previous IS NULL) OR @current = @previous)
-            BEGIN
-                IF @current IS NULL SET @allowed = 1;
-                ELSE
-                BEGIN
-                    -- Re-run only after the previous attempt's Agent outcome is failed (0) or canceled (3),
-                    -- or the generator logged that it could not create the job.
-                    DECLARE @prefix VARCHAR(60) = 'BTVY_' + @current + '_';
-                    IF ISNULL((SELECT TOP(1) h.run_status FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobhistory h ON h.job_id = j.job_id AND h.step_id = 0
-                               WHERE LEFT(j.name, LEN(@prefix)) = @prefix ORDER BY h.instance_id DESC), -1) IN (0, 3)
-                       OR (NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs j WHERE LEFT(j.name, LEN(@prefix)) = @prefix)
-                           AND EXISTS (SELECT 1 FROM EDWUTIL.OPR.EdwJobGeneratorLog l WHERE l.JobCreationStatus = 'FAILED' AND LEFT(l.JobName, LEN(@prefix)) = @prefix))
-                        SET @allowed = 1;
-                END
-            END
-            IF @allowed = 1
-            BEGIN
-                    UPDATE {Table} SET ExecutedBy = SUSER_SNAME(), RunToken = @token, ExecutedAt = SYSDATETIMEOFFSET(), FinishedAt = NULL
-                    WHERE RequestId = @id AND ISNULL(RunToken, '') = ISNULL(@current, '');
-                    SET @result = @@ROWCOUNT;
-            END
-            COMMIT;
-            SELECT @result;
+            UPDATE {Table}
+            SET ExecutedBy = SUSER_SNAME(), RunToken = @token, ExecutedAt = SYSDATETIMEOFFSET(), FinishedAt = NULL
+            WHERE RequestId = @id AND RunToken IS NULL AND ExecutedBy IS NULL AND @previous IS NULL;
+            SELECT @@ROWCOUNT;
             """;
         cmd.Parameters.Add("@id", SqlDbType.Int).Value = id;
         cmd.Parameters.Add("@token", SqlDbType.VarChar, 50).Value = runToken;
@@ -187,7 +174,8 @@ public sealed class SqlRequestStore(Store store, AgentClient agent) : IRequestSt
         if (taken.Count == 0) return result;
         await using var db = await Open(ct);
         // Two parameters per request; stay well under SQL Server's 2100-parameter limit.
-        foreach (var chunk in taken.Chunk(500)) await ReadStatuses(db, chunk, result, ct);
+        foreach (var chunk in taken.Where(r=>!r.IsImported).Chunk(500)) await ReadStatuses(db, chunk, result, ct);
+        foreach (var chunk in taken.Where(r=>r.IsImported).Chunk(500)) await ReadImportedStatuses(db, chunk, result, ct);
         return result;
     }
     private static async Task ReadStatuses(SqlConnection db, JobRequest[] taken, Dictionary<int, AgentStatus> result, CancellationToken ct)
@@ -247,11 +235,16 @@ public sealed class DemoRequestStore : IRequestStore
     private readonly object gate = new();
     private readonly List<JobRequest> rows = [];
     public Task<List<JobRequest>> List(CancellationToken ct) { lock (gate) return Task.FromResult(rows.OrderByDescending(r => r.RequestId).ToList()); }
+    private int nextId;
+    public Task<bool> DeletePending(int id, CancellationToken ct)
+    {
+        lock (gate) return Task.FromResult(rows.RemoveAll(r => r.RequestId == id && r.ExecutedBy is null && r.RunToken is null) == 1);
+    }
     public Task<int> Create(JobDefinition j, string requestedBy, CancellationToken ct)
     {
         lock (gate)
         {
-            var id = rows.Count == 0 ? 1 : rows.Max(r => r.RequestId) + 1;
+            var id = ++nextId;
             rows.Add(new JobRequest
             {
                 RequestId = id, JobName = j.JobName, MIGPackageName = j.MIGPackageName, StgPackageName = j.StgPackageName, StgFullInitialLoad = j.StgFullInitialLoad == true,
@@ -261,13 +254,13 @@ public sealed class DemoRequestStore : IRequestStore
             return Task.FromResult(id);
         }
     }
-    // Busy detection needs Agent state; in demo the caller's check against the monitored list covers it.
+    // Each request can be claimed only once.
     public Task<ClaimResult> Claim(int id, string runToken, string? previousToken, ConnectionInput employee, CancellationToken ct)
     {
         lock (gate)
         {
             var i = rows.FindIndex(r => r.RequestId == id);
-            if (i < 0 || rows[i].RunToken != previousToken) return Task.FromResult(ClaimResult.Taken);
+            if (i < 0 || previousToken is not null || rows[i].RunToken is not null || rows[i].ExecutedBy is not null) return Task.FromResult(ClaimResult.Taken);
             var login = employee.IntegratedSecurity ? RequestStates.CurrentUser : employee.UserName;
             rows[i] = rows[i] with { ExecutedBy = login, RunToken = runToken, ExecutedAt = DateTimeOffset.Now, FinishedAt = null };
             return Task.FromResult(ClaimResult.Claimed);
@@ -342,7 +335,7 @@ public sealed class RequestMonitor(Store store, IRequestStore requests, ILogger<
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { statusError = "Job durumu msdb'den okunamadı: " + ex.Message; }
             Requests = rows.Select(r => Resolve(r, r.RunToken is null ? null : local.GetValueOrDefault(r.RunToken), remote.GetValueOrDefault(r.RequestId))).ToList();
-            foreach (var row in Requests.Where(r => RequestStates.Final(r.Status) && r.RunToken is not null && r.FinishedAt is not null))
+            foreach (var row in Requests.Where(r => !r.IsImported && RequestStates.Final(r.Status) && r.RunToken is not null && r.FinishedAt is not null))
             {
                 if (rows.First(r => r.RequestId == row.RequestId).FinishedAt is not null) continue;
                 if (!local.TryGetValue(row.RunToken!, out var run) || run.ConnectionSnapshot is null) continue;
@@ -363,6 +356,12 @@ public sealed class RequestMonitor(Store store, IRequestStore requests, ILogger<
     // The computer that runs a request has the richest view; everyone else reads msdb.
     internal static JobRequest Resolve(JobRequest row, RunRecord? run, AgentStatus? agent)
     {
+        if (row.IsImported)
+        {
+            var archived = agent ?? ImportedExecution.Snapshot(row);
+            return row with { Status=archived.Status,StatusMessage=archived.Message,AgentJobName=row.JobName,
+                StartedAt=archived.StartedAt??row.ExecutedAt,FinishedAt=archived.FinishedAt??row.FinishedAt };
+        }
         if (row.ExecutedBy is null) return row with { Status = "Pending" };
         if (run is not null)
             return row with { Status = RequestStates.FromRun(run.Status), StatusMessage = run.Message, CurrentStep = run.CurrentStep,

@@ -1,1 +1,9 @@
-{"private":true,"scripts":{"test:ui":"node exec-import.test.cjs && node ui.test.cjs"},"devDependencies":{"jsdom":"22.1.0"}}
+{
+  "private": true,
+  "scripts": {
+    "test:ui": "node exec-import.test.cjs && node localization.test.cjs && node ui.test.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "22.1.0"
+  }
+}

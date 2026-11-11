@@ -1,4 +1,4 @@
-namespace SqlJobRunner;
+﻿namespace SqlJobRunner;
 
 public record ConnectionInput(string Server = "", bool IntegratedSecurity = true, string UserName = "",
     string? Password = null, bool Encrypt = false, bool TrustServerCertificate = true,
@@ -55,12 +55,50 @@ public record ExecuteJobRequest(JobDefinition Job,string RequestId);
 // Server holding EDWUTIL.OPR.EdwJobGeneratorRequests, reached with the embedded request login.
 public record RequestSettings(string Server = RequestSettings.DefaultServer, bool Encrypt = false, bool TrustServerCertificate = true)
 {
-    public const string DefaultServer = @"SRVDEV\PASIFIK";
+    public const string DefaultServer = "PASIFIK";
 }
-// A connection must be confirmed once per application session before running requests.
+// The authenticated execution connection expires after three hours without a successful user operation.
 public sealed class ConnectionSession
 {
-    public volatile bool Connected;
+    public static readonly TimeSpan IdleTimeout = TimeSpan.FromHours(3);
+    private readonly object gate = new();
+    private sealed record Login(string Token, ConnectionInput Connection, RequestSettings Settings, DateTimeOffset LastActivityUtc);
+    private Login? login;
+    public string Authorize(ConnectionInput connection, RequestSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            var token = Guid.NewGuid().ToString("N");
+            login = new(token, connection, settings, now);
+            return token;
+        }
+    }
+    private Login? Active(RequestSettings settings, DateTimeOffset now)
+    {
+        if (login is not null && (login.Settings != settings || now-login.LastActivityUtc >= IdleTimeout)) login = null;
+        return login;
+    }
+    public void Clear() { lock (gate) login = null; }
+    public bool IsActive(RequestSettings settings, DateTimeOffset now)
+    { lock (gate) return Active(settings, now) is not null; }
+    public ConnectionInput? GetConnection(string? token, RequestSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            var value = Active(settings, now);
+            return value is not null && token == value.Token ? value.Connection : null;
+        }
+    }
+    public bool Touch(string? token, RequestSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            var value = Active(settings, now);
+            if (value is null || token != value.Token) return false;
+            login = value with { LastActivityUtc = now };
+            return true;
+        }
+    }
 }
 public static class RunStates
 {

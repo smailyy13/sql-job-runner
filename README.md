@@ -1,4 +1,4 @@
-# SQL Job Runner
+﻿# SQL Job Runner
 
 Windows üzerinde yerel SQL Server Agent job çalıştırma ve takip uygulaması. Arayüz SchemaDiff'in açık/koyu temasını kullanır.
 
@@ -40,26 +40,13 @@ Hazır pakette **Start-Demo.cmd** dosyasını açın. Demo adresi **http://127.0
 
 Demo üst çubuğundan senaryo seçip EXEC örneğini yükleyin ve Çalıştır'a basın. Başarı, hata, iptal, yeniden deneme, uzun çalışma, belirsiz durum ve oluşturma hatası senaryoları bulunur. Demo SQL bağlantısı açmaz; gerçek prosedür, paket ve yetki doğrulaması yapmaz. Kayıtları `%LOCALAPPDATA%\SqlJobRunnerDemo` altında tutulur. Ayrıntılı kontrol listesi: [TEST-SENARYOLARI.md](TEST-SENARYOLARI.md).
 
-## İlk gerçek bağlantı
+## Ortam ve bağlantı
 
-1. SQL Server Agent servisi çalışıyor olmalı.
-2. `EDWUTIL.OPR.EdwJobGenerator` prosedürü ve `EDWUTIL.OPR.EdwJobGeneratorLog` tablosu mevcut olmalı. Uygulama bu nesneleri kurmaz.
-3. Uygulamada sunucu adını ve Windows veya SQL kimlik doğrulamasını seçin. Windows kimlik doğrulaması EXE'yi çalıştıran Windows hesabını kullanır.
-4. Varsayılan bağlantı ayarları **Encrypt: Optional (False)** ve **Trust server certificate: True**. Kurumunuzun bağlantı politikasına göre ayarlayın.
-5. Hesabın prosedür çalıştırma, log okuma ve ilgili Agent job'larını oluşturma, başlatma ve izleme yetkilerini DBA ile doğrulayın. Sunucuya bağlanabilmek bu yetkilerin tümünün bulunduğu anlamına gelmez.
+Varsayılan ortam PASIFIK'tir. İlk Çalıştır tıklamasında hesapla giriş ekranı açılır; sonraki çalıştırmalar aynı doğrulanmış bağlantıyı kullanır. Windows kimlik doğrulaması veya SQL hesabı kullanılabilir. Başarılı bağlantıdan sonra seçili istek için çalıştırma onayı gösterilir. Hesabın gerçek çalıştırma yetkilerini SQL Server denetler. Sunucu Ayarlar'daki ortamdır; çalıştırma girişinde değiştirilemez. Oturum, üç saat başarılı kullanıcı işlemi yapılmadığında sona erer. Başarılı çalıştırma, istek gönderme, silme ve elle yenileme gibi işlemler süreyi yeniler; otomatik GET sorguları ve arka plan izleme yenilemez. Ortam değişirse, hesap ayarı değiştirilirse veya uygulama yeniden başlatılırsa yeniden giriş gerekir. Süre dolması çalışan job'ları durdurmaz. Tarayıcı yalnızca oturum belirtecini sessionStorage'da tutar; parola tarayıcıya kaydedilmez. Eski job çalıştırma API yolları bu akışı atlayamaz.
 
-`owner_login_name is invalid` hatası, paylaşılan prosedürdeki sabit `saProd` sahibinin geçerliliğinin/yetkilerinin DBA tarafından kontrol edilmesini gerektirir. Uygulama owner parametresi göndermez. SSMS'teki `(1 row affected)` tek başına job başarısı değildir; prosedür hata loguna satır yazmış olabilir.
+Ortamı Ayarlar → Sunucu adı alanından değiştirin. İstek tablosu, yeni çalıştırmalar ve SSIS hata listesi aynı ortamı kullanır. Gerekirse Ayarlar → Kimlik doğrulama bölümünden o sunucu için farklı kimlik bilgileri kaydedilebilir. Başlatılmış işler kaydedildikleri bağlantı kopyasıyla izlenir; sonraki ortam değişikliği bu işleri başka sunucuya yönlendirmez.
 
-Kontrollü ilk örnek:
-
-```sql
-EXEC EDWUTIL.[OPR].[EdwJobGenerator]
-    @JobName = 'TEST_SELECT_ONLY',
-    @Sql1 = 'SELECT 1 AS TestResult',
-    @Sql2 = NULL;
-```
-
-SELECT iş tablolarını değiştirmez; prosedür Agent job ve log kayıtları oluşturabilir. Sonucu uygulamanın çalışma geçmişinden ve SQL Server Agent geçmişinden doğrulayın.
+Önceki SRVDEV\PASIFIK varsayılanı yerel ayarlarda kayıtlıysa ilk yükseltmede bir kez PASIFIK'e geçirilir. Daha sonra Ayarlar'dan açıkça seçilen ortam korunur. Şifreleme ve sertifika seçenekleri Ayarlar'dan yönetilir.
 
 ## Çalıştırma
 
@@ -83,9 +70,9 @@ Danışmanlar job'ı doğrudan çalıştırmaz; uygulamadan `EDWUTIL.OPR.EdwJobG
 2. İstek tablosunun sunucusu üst çubuktaki **Ayarlar** penceresinden girilir; varsayılan `SRVDEV\PASIFIK`. Kaydedince tablo hemen okunur, erişilemiyorsa hata pencerede gösterilir. Ayar o bilgisayarın yerel kayıt dosyasında tutulur. Kaydedilmemişse paket klasöründeki `appsettings.json` (`Requests:Server`) kullanılır.
 3. Tablo okuma, istek ekleme ve job durumunu okuma uygulamaya gömülü `sureviewx` hesabıyla yapılır; danışman şifre girmez. Hesap bilgisi kaynakta şifreli tutulur. Anahtar uygulamayla birlikte dağıtıldığı için bu yöntem bilgiyi kod okuyandan gizler, ancak EXE'yi decompile eden birinden korumaz. Hesabın yetkisini yalnız bu tabloyla sınırlı tutun.
 4. **Yeni istek** penceresine EXEC kodunu yapıştırıp **İsteği gönder**'e basın. İstek tabloya yazılır, çalıştırılmaz. `ExecutedBy` boş olduğu sürece istek bekliyor sayılır.
-5. Uygulama tabloyu yaklaşık 5 saniyede bir okur. Başka bir kullanıcıdan yeni istek geldiğinde, siteyi açık tutan herkese uygulama içi ve masaüstü bildirimi gösterilir. Site ilk açıldığında bildirim izni istenir ve izin verilirse bir hoş geldin bildirimi gönderilir.
-6. Çalışan **▷ Çalıştır**'a bastığında, uygulama oturumunda ilk kez çalıştırıyorsa bağlantı penceresi açılır. Bağlandıktan sonra uygulama kapanana kadar tekrar sorulmaz. İstek, çalışanın kendi SQL bağlantısıyla tek bir UPDATE ile alınır: `ExecutedBy = SUSER_SNAME()`, `RunToken`, `ExecutedAt = SYSDATETIMEOFFSET()`. İki çalışan aynı isteği çalıştıramaz. Çalışan hesabının bu üç kolon için UPDATE yetkisi olmalıdır ve bağlandığı sunucu istek tablosunun bulunduğu sunucu olmalıdır.
-7. Durum tabloya yazılmaz. Diğer kullanıcılar `RunToken` ile prosedürün oluşturduğu `BTVY_<RunToken>_<tarih>` job'ını msdb'de bulur ve durumu, son tamamlanan adımı ve sonucu oradan okur. Oluşturma hatası `EdwJobGeneratorLog`'dan okunur. İsteği çalıştıran bilgisayar kendi ayrıntılı takibini gösterir. Çalıştıran kişi uygulamayı kapatsa da diğerleri güncel Agent durumunu görür. Agent geçmişi temizlenen eski isteklerin sonucu görünmez.
+5. Uygulama tabloyu yaklaşık 3 saniyede bir okur. Başka bir kullanıcıdan yeni istek geldiğinde, siteyi açık tutan herkese uygulama içi ve masaüstü bildirimi gösterilir. Site ilk açıldığında bildirim izni istenir ve izin verilirse bir hoş geldin bildirimi gönderilir.
+6. Çalışan **▷ Çalıştır**'a bastığında, uygulama oturumunda ilk kez çalıştırıyorsa bağlantı penceresi açılır. Bağlandıktan sonra uygulama kapanana kadar tekrar sorulmaz. İstek, çalışanın kendi SQL bağlantısıyla tek bir UPDATE ile alınır: `ExecutedBy = SUSER_SNAME()`, `RunToken`, `ExecutedAt = SYSDATETIMEOFFSET()`. İki çalışan aynı isteği çalıştıramaz. Çalışan hesabının bu üç kolon ve FinishedAt için UPDATE yetkisi olmalıdır ve bağlandığı sunucu istek tablosunun bulunduğu sunucu olmalıdır.
+7. Durum tabloya yazılmaz. Diğer kullanıcılar `RunToken` ile prosedürün oluşturduğu `BTVY_<RunToken>_<tarih>` job'ını msdb'de bulur ve durumu, son tamamlanan adımı ve sonucu oradan okur. Oluşturma hatası `EdwJobGeneratorLog`'dan okunur. Tüm kullanıcılar Adımlar ve Mesajlar sekmelerinde ortak Agent geçmişini görür. Çalıştıran kişi uygulamayı kapatsa da diğerleri güncel Agent durumunu görür. Agent geçmişi temizlenen eski isteklerin sonucu görünmez.
 
 ## Kullanım
 
@@ -109,7 +96,7 @@ Parametreler kaynakla aynı tiptedir: JobName VARCHAR(50), paketler VARCHAR(300)
 
 Prosedür hataları CATCH içinde loga yazabildiğinden çağrının dönmesi başarı sayılmaz. Oluşturma hatası `EDWUTIL.OPR.EdwJobGeneratorLog` üzerinden; çalışma sonucu msdb Agent aktivite ve geçmiş kayıtlarından kontrol edilir. Son LOG UPDATE adımına erişemeyen bir job logda NOT EXECUTED kalabilir; nihai sonuç Agent geçmişinden alınır.
 
-Aktif adım `sp_help_job.current_execution_step` alanından okunur. Uygulama adım numarasını tahmin etmez. Takip yaklaşık 5 saniyede bir, ekran yenilemesi 3 saniyede bir yapılır. Ağ beklemeleri bu süreleri uzatabilir.
+Aktif adım `sp_help_job.current_execution_step` alanından okunur. Uygulama adım numarasını tahmin etmez. Takip yaklaşık 3 saniyede bir, ekran yenilemesi 3 saniyede bir yapılır. Ağ beklemeleri bu süreleri uzatabilir.
 
 ## Çift çalıştırma ve yeniden açılış
 
@@ -138,3 +125,45 @@ dotnet test .\Tests\SqlJobRunner.Tests.csproj -c Release
 DOM ve EXEC testleri için `Tests` klasöründe `npm install` ve `npm run test:ui`. `Tests/Smoke.ps1` yalnız boş/geçici veri klasörüyle açılmış uygulamaya karşı çalıştırılır; SQL job göndermez.
 
 Şirket SQL Server'ında gerçek job oluşturma, başlatma ve yetki kombinasyonu canlı olarak doğrulanmamıştır. İlk deneme kontrollü bir test job'ıyla yapılmalıdır.
+
+## Ayrıntılı geçmiş ve tek çalıştırma
+
+Her istek yalnızca bir kez çalıştırılır. Başarılı, hatalı veya iptal edilmiş isteklerde tekrar çalıştırma yoktur. Aynı kullanıcı etiketiyle oluşturulan farklı istekler birbirinden bağımsızdır.
+
+Çalışma geçmişinden bir kayıt seçip **Adımlar** sekmesini açın. Her bilgisayar ayrıntıları ortak msdb geçmişinden okur; çalıştıran bilgisayarda olma şartı yoktur. Adım adı, sonuç, başlangıç/bitiş, süre, SQL hata numarası, önem derecesi ve Agent'ın kaydettiği mesaj gösterilir. Adımlar sekmesindeki **Mesajı göster** bağlantısı tam kayıt metnini açar. Ayrıntılar yalnızca seçili kayıt için yüklenir ve açıkken yenilenir.
+
+Yeni tablo veya yetki gerekmez; mevcut `sureviewx` hesabının `msdb.dbo.sysjobs` ve `msdb.dbo.sysjobhistory` SELECT yetkileri kullanılır. SQL Agent geçmişi temizlenirse adım ayrıntıları da kaybolur. Henüz tamamlanmayan adımların history kaydı olmayabilir. Mesajlar Agent'ın sakladığı kapsamla sınırlıdır. Önceden tekrar çalıştırılmış isteklerde son kayıtlı çalışma etiketi gösterilir.
+
+## Bekleyen isteği silme
+
+İstekler listesinin sağındaki × düğmesi yalnız bekleyen kayıtlarda görünür. Silme onayından sonra kayıt kalıcı silinir. Çalıştırılmak üzere alınmış bir istek, onay penceresi açıkken durumu değişse bile silinmez. Çalışma geçmişinde bekleyen kayıtlar ve İşlemler sütunu gösterilmez; satıra tıklayarak ayrıntılar açılır.
+
+Silme işlemi mevcut sureviewx bağlantısıyla doğrudan tablo üzerinde yapılır; bu hesabın DELETE yetkisi olmalıdır. Ek prosedür veya kurulum scripti gerekmez. Parametreli DELETE yalnız ExecutedBy ve RunToken boş olan kaydı siler; çalıştırma ile aynı anda silme denenirse çalışan kayıt korunur.
+
+## SSIS OnError ayrıntıları
+
+Üst çubuğun sağındaki **SSIS Hataları** düğmesi bağımsız bir pencere açar. Hatalar varsayılan olarak çalışma kimliğine göre gruplanır; her grupta hata sayısı ve ana paket gösterilir. Gruplama anahtarıyla düz tabloya geçilebilir; seçim hatırlanır. Mesajı göster ayrı bir ayrıntı penceresi açar. Mesaj sekmesi ham metni tek kez gösterir, Çalışma bilgileri sekmesi paket/kaynak/zaman/yol bilgilerini iki sütunda gösterir. Önceki/Sonraki düğmeleri gruplu görünümde aynı çalışmanın hataları arasında ilerler. Yenileme açık grupları veya okunmakta olan mesajı kapatmaz. Son 48 saatin EDW, ERPEDW ve MessageUtilization klasörlerindeki erişilebilir tüm OnError mesajları, SQL tarafında tarih aralığı filtresiyle tek sorguda okunur. SQL sorgusu parametrelidir; mesajın zamanı esas alınır. Job eşleştirmesi ve kayıt sınırı yoktur.
+
+Uygulama açık olduğu sürece panel ve tarayıcı kapalıyken de yaklaşık 3 saniyede bir sadece son görünür OnError mesajının kimliği sorgulanır (TOP 1, mesaj gövdesi yok). Kimlik değişmişse son 48 saatin tam listesi çekilir; değişmemişse tam mesaj sorgusu yapılmaz. COUNT ile tüm kayıtlar sayılmaz. Süresi dolan mesajlar önbellekten çıkarılır. Geç commit edilen düşük kimlikli kayıtları, görünürlük değişikliklerini ve geçmiş temizliğini yakalamak için en geç 5 dakikada bir tam liste doğrulanır. SQL hatasında 10 saniye beklenerek yeniden denenir. Bu sorgunun canlı maliyeti SSISDB büyüklüğüne, mevcut indekslere ve görünürlük filtrelerine bağlıdır.
+
+Önbellek aynı uygulamanın tüm tarayıcı sekmeleri arasında paylaşılır; eşzamanlı sorgular birleştirilir. Yenile düğmesi tam sorguyu hemen çalıştırır. Panelde yalnız Son güncelleme gösterilir: tablodaki verinin son değiştiği andır. Yeni kayıt, veri değişikliği veya silinme/48 saatten çıkma bu zamanı yeniler. Aynı veriyi yeniden okumak veya hafif kontrol yapmak zamanı değiştirmez. İlk başarılı yükleme başlangıç zamanı kabul edilir. Hata halinde önceki veriler ve bu zaman korunur. Ortam değişince eski ortamın verisi sunulmaz.
+
+SSIS sunucusu Ayarlar'daki ortamdır; varsayılan PASIFIK'tir. Okuma sureviewx hesabıyla catalog.executions ve catalog.event_messages üzerinden yapılır; ilgili SSISDB kayıtlarında okuma görünürlüğü gerekir. Sorgu mevcut SQL tablolarını değiştirmez. Tam mesaj, kaynak, alt bileşen ve execution path korunur; temizlenmiş veya hesaba görünmeyen geçmiş listelenemez.
+
+## Prod geçmişini aktarma
+
+Önce bu sürümü kurun ve uygulama Ayarlar bölümündeki istek sunucusunu PASIFIK olarak kontrol edin. `sql/ImportCompletedHistory.sql` yalnız eski tamamlanmış çalışmaları gösterime açmak içindir. Yeni sütun veya tablo oluşturmaz. `RunToken` alanına job_id, genel history instance_id ve terminal sonucu içeren H: arşiv referansı yazılır; bu referans normal çalıştırma etiketi değildir.
+
+Scriptin varsayılanı Apply=0 önizlemedir. Son 30 tam gün, bugün hariç, en fazla 100 en eski uygun Agent çalışması seçilir. Tarih aralığını ihtiyaç duyulan tarihlere göre daraltın. SQL Server 2016+ gerekir. SSMS'te PASIFIK sunucusunda EDWUTIL için yeni bir query penceresinde scriptin tamamını çalıştırın.
+
+Önizleme çıktısında CurrentServer, PreviewCount, PreviewFingerprint ve bütün satırları inceleyin. PASIFIK bir alias olabilir; CurrentServer fiziksel sunucu/instance adını döndürür. Gerçek aktarım için ancak incelenen değerleri ExpectedServer, ExpectedCount ve ExpectedFingerprint ayarlarına kopyalayıp Apply=1 yapın. Script liste değiştiyse, hedefte mükerrer varsa veya sunucu farklıysa hata verip durur. INSERT kısa bir transaction içindedir; mevcut istekleri, Agent işlerini veya kaynak logları değiştirmez. Hata olursa batch geri alınır. Aktarım sonunda dönen yeni RequestId/RunToken listesini saklayın. Her sonraki batch için tekrar önizleme gerekir.
+
+Yalnız CREATED log kaydıyla adı tam eşleşen, tek log eşleşmesi bulunan, halen var olan job'ların msdb'de terminal sonucu bulunan çalışmaları alınır. Başarılı/hatalı/iptal sonuçları Agent'tan gelir. Aktarım çalıştırılabilir bekleyen istek üretmez ve yeni istek bildirimi göndermez. Aynı job'ın farklı eski çalışmaları farklı history kimlikleriyle ayrılır. Çalıştıran kişinin gerçek login'i eski logdan doğrulanamadığı için bu alan açıkça 'Geçmiş aktarımı; çalıştıran doğrulanmadı' olarak işaretlenir. RequestedBy kaynak logdaki UserName'dir; bununla çalıştıran kimliği varsayılmaz.
+
+Kaynak prosedür logunda MIGPackageName ve EdwdmPackageName bulunmadığından bu alanlar NULL bırakılır. Kaynakta bulunmayan parametreler tahmin edilmez; Parametreler sekmesi arşiv kaydında bunun çalıştırılabilir bir istek olmadığını belirtir. silinmiş job'lar, Agent genel sonucu silinmiş kayıtlar, yalnız oluşturma hataları ve birden fazla CREATED log eşleşmesi bu scriptin kapsamına girmez.
+
+Adım/mesaj ayrıntıları ilgili job_id ve seçili history instance_id aralığından okunur. msdb geçmişi daha sonra temizlenirse ayrıntılar kaybolabilir; aktarılan temel sonuç ve başlangıç/bitiş bilgileri arşiv referansı ve istek satırından gösterilmeye devam eder.
+
+## Sonuç inceleme
+
+Alt bölümde Özet, Adımlar ve Job içeriği bulunur. Ayrı Mesajlar sekmesi kaldırılmıştır; tam Agent mesajları Adımlar içindeki Mesajı göster bölümünden okunur. Job içeriği, eski Parametreler sekmesidir ve isteğin paket/SQL içeriğini gösterir. Silme işlemi ortak hesapla yalnız bekleyen istekler için mevcut onay akışını kullanmaya devam eder.

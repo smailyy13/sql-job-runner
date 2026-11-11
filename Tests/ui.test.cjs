@@ -1,4 +1,4 @@
-// DOM unit tests only; no browser or network requests are used.
+﻿// DOM unit tests only; no browser or network requests are used.
 const {JSDOM} = require('jsdom');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -6,7 +6,8 @@ const assert = require('node:assert/strict');
 const root = path.join(__dirname,'../wwwroot');
 const dom = new JSDOM(fs.readFileSync(path.join(root,'index.html'),'utf8'),{url:'http://127.0.0.1:5295',runScripts:'outside-only'});
 const w = dom.window, d = w.document, requests = [];
-let serverSession = false, settings = {server:'SRVDEV\\PASIFIK',encrypt:false,trustServerCertificate:true};
+let ssisFailure = false;
+let serverSession = false, settings = {server:'PASIFIK',encrypt:false,trustServerCertificate:true};
 const state = {demoMode:true,jobs:[],runs:[],notifications:[],requests:[],sessionConnected:false,currentUser:'CORP\\me',connection:{server:'test-server',integratedSecurity:true}};
 const json = (body,status = 200) => ({ok:status < 400,status,json:async () => body});
 w.HTMLDialogElement.prototype.showModal = function() { this.setAttribute('open',''); };
@@ -27,10 +28,31 @@ w.fetch = async (url,options = {}) => {
     state.requests.unshift({...job,requestId,requestedBy:'CORP\\me',requestedAt:new Date().toISOString(),status:'Pending'});
     return json({requestId});
   }
+  if (url.startsWith('/api/ssis-errors') && ssisFailure) return json({error:'SSIS hataları okunamadı: SQL raw error'},503);
+  if (url.startsWith('/api/ssis-errors')) return json({
+    server:'PASIFIK',from:new Date(Date.now()-48*3600000).toISOString(),before:new Date().toISOString(),updatedUtc:'2026-10-26T07:30:00Z',tableUpdatedUtc:'2026-10-26T07:30:00Z',checkedUtc:'2026-10-26T07:30:03Z',lastAttemptUtc:'2026-10-26T07:30:00Z',errorCount:3,notices:[],executions:[{stepId:2,stepName:'EDW',matchMethod:'PackageAndTime',executionId:'76503',folder:'EDW',project:'EDW',package:'EDW_MAIN_LOADER.dtsx',errors:[
+      {messageId:'1',messageTime:new Date(Date.now()-3600000).toISOString(),packageName:'EDW_TRX_CUSTOMER_PORTFOLIO_HISTORY.dtsx',message:"Cannot insert NULL into EdwEtlDate. <script>unsafe</script>",sourceName:'START SP_ins_TRXCustomerPortfolioHistory',subcomponentName:null,executionPath:'\\EDW_MAIN_LOADER\\Line_05'},
+      {messageId:'2',messageTime:new Date(Date.now()-2*3600000).toISOString(),packageName:'CHILD.dtsx',message:'Second error message',sourceName:'SECOND',executionPath:'\\EDW_MAIN_LOADER\\Line_02'}
+    ]},{executionId:'76504',folder:'EDW',project:'EDW',package:'OTHER.dtsx',errors:[{messageId:'3',messageTime:new Date(Date.now()-3*3600000).toISOString(),packageName:'OTHER.dtsx',message:'Other execution error',sourceName:'OTHER'}]}]
+  });
+  if (/^\/api\/requests\/\d+\/history$/.test(url)) return json({runToken:'shared-token',entries:[
+    {instanceId:1,stepId:1,name:'Prepare',status:1,message:'First step succeeded',durationSeconds:10,startedAt:'2026-10-22T10:00:00+03:00',finishedAt:'2026-10-22T10:00:10+03:00',sqlErrorNumber:0,sqlSeverity:0},
+    {instanceId:2,stepId:2,name:'Process',status:0,message:'<script>unsafe</script> Full SQL failure',durationSeconds:65,startedAt:'2026-10-22T10:00:10+03:00',finishedAt:'2026-10-22T10:01:15+03:00',sqlErrorNumber:50001,sqlSeverity:16}
+  ]});
+  const deleted = /^\/api\/requests\/(\d+)$/.exec(url);
+  if (deleted && options.method === 'DELETE') { state.requests = state.requests.filter(r => r.requestId !== Number(deleted[1])); return json(null,204); }
+  const authorize = /^\/api\/requests\/(\d+)\/authorize$/.exec(url);
+  if (authorize) {
+    const {password,...safe}=JSON.parse(options.body);
+    state.connection={...safe,hasPassword:!!password};
+    state.sessionConnected=true;
+    return json({authorizationToken:'session-token'});
+  }
   const run = /^\/api\/requests\/(\d+)\/run$/.exec(url);
   if (run) {
-    if (!serverSession) return json({error:'İsteği çalıştırmak için önce SQL Server\'a bağlanın.',needsConnection:true},409);
     assert.match(JSON.parse(options.body).requestId,/^[0-9a-f]{32}$/);
+    assert.equal(JSON.parse(options.body).authorizationToken,'session-token');
+    assert.equal(options.headers['X-Execution-Session'],'session-token');
     const request = state.requests.find(r => r.requestId === Number(run[1])); request.status = 'Queued'; request.executedBy = 'CORP\\me';
     return json({runId:'run-' + run[1],jobId:'job-' + run[1]});
   }
@@ -80,7 +102,7 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   assert.equal(sent.sql2,"UPDATE EDW.CMP.LKPPushPayloadType SET EdwValidFrom = '2010-01-01'");
   assert.ok(!d.getElementById('jobDialog').open);
   assert.equal(posts('/api/jobs/execute'),0,'sending a request must not run it');
-  assert.equal(d.getElementById('totalCount').textContent,'1'); assert.equal(d.querySelectorAll('.counts > span').length,3);
+  assert.equal(d.getElementById('totalCount').textContent,'1'); assert.equal(d.querySelectorAll('.counts > span').length,2);
   assert.ok(runButton(1),'pending request can be run');
   d.querySelector('[data-tab="parameters"]').click(); assert.ok(d.getElementById('detailBody').textContent.includes("''2010-01-01''"));
   d.querySelector('[data-tab="summary"]').click();
@@ -102,40 +124,44 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   w.localStorage.setItem('jobRunnerSeenRequest','2');
   console.log('PASS: new request desktop notification excluding own requests and seen baseline');
 
-  // First run in a session asks for a connection, then continues to the run confirmation.
-  runButton(1).click(); await settle();
-  assert.ok(d.getElementById('connectionDialog').open); assert.ok(!d.getElementById('confirmDialog').open);
-  assert.ok(!requests.some(r => /\/run$/.test(r.url)),'no run before connecting');
+  // First run asks for an account; subsequent runs reuse it until the idle timeout.
+  runButton(1).click(); await settle(5);
+  assert.ok(d.getElementById('connectionDialog').open);
+  assert.ok(!d.getElementById('confirmDialog').open);
+  assert.ok(!requests.some(r => /\/run$/.test(r.url)));
   assert.equal(d.querySelectorAll('#recentList .recent-item').length,1);
-  const connectionForm = d.getElementById('connectionForm'), cf = connectionForm.elements;
+  const connectionForm=d.getElementById('connectionForm'), cf=connectionForm.elements;
+  assert.equal(d.getElementById('cServer').readOnly,true,'run login uses configured environment');
+  assert.equal(cf.server.value,'test-server');
   assert.equal(cf.encrypt.value,'false'); assert.equal(cf.trustServerCertificate.value,'true');
   assert.ok(d.getElementById('rowUser').classList.contains('hidden'));
-  cf.auth.value = 'sql'; cf.auth.dispatchEvent(new w.Event('change')); assert.ok(!d.getElementById('rowUser').classList.contains('hidden'));
-  cf.server.value = 'draft-server'; cf.userName.value = 'draft-user'; cf.password.value = 'draft-password';
+  cf.auth.value='sql'; cf.auth.dispatchEvent(new w.Event('change'));
+  assert.ok(!d.getElementById('rowUser').classList.contains('hidden'));
+  cf.userName.value='authorized-user'; cf.password.value='draft-password'; cf.rememberPassword.checked=true;
   assert.equal(d.getElementById('testConnectionBtn'),null);
-  assert.ok(!requests.some(r => r.url === '/api/connection'),'opening the form must not save credentials');
-  assert.equal(d.getElementById('cDatabase'),null);assert.equal(cf.database,undefined);
-  cf.rememberPassword.checked = true;
-  connectionForm.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true})); await settle(5);
-  const probe = requests.findLast(r => r.url === '/api/connections/test'); assert.equal(JSON.parse(probe.options.body).server,'draft-server');
-  const connect = requests.findLast(r => r.url === '/api/connection'); assert.equal(JSON.parse(connect.options.body).database,undefined); assert.equal(JSON.parse(connect.options.body).rememberPassword,true);
+  assert.equal(d.getElementById('cDatabase'),null); assert.equal(cf.database,undefined);
+  connectionForm.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true})); await settle(6);
   assert.ok(!d.getElementById('connectionDialog').open); assert.equal(cf.password.value,'');
-  assert.ok(d.getElementById('confirmDialog').open,'run confirmation follows the connection');
+  assert.equal(posts('/api/requests/1/authorize'),1);
+  assert.equal(posts('/api/requests/1/run'),0,'authorization does not run the job');
+  assert.ok(d.getElementById('confirmDialog').open);
   d.getElementById('confirmYes').click(); await settle(5);
   assert.equal(posts('/api/requests/1/run'),1);
-  assert.equal(state.requests.find(r => r.requestId === 1).status,'Queued'); assert.equal(runButton(1),null);
-  // Still connected: the next run goes straight to confirmation.
-  runButton(2).click(); await settle();
-  assert.ok(!d.getElementById('connectionDialog').open); assert.ok(d.getElementById('confirmDialog').open);
+  assert.equal(state.requests.find(r=>r.requestId===1).status,'Queued'); assert.equal(runButton(1),null);
+  assert.equal(w.sessionStorage.getItem('jobRunnerExecutionSession'),'session-token','session survives page refresh without storing credentials in the browser');
+  runButton(2).click(); await settle(5);
+  assert.ok(!d.getElementById('connectionDialog').open,'second run reuses the authenticated account');
+  assert.ok(d.getElementById('confirmDialog').open);
   d.getElementById('confirmYes').click(); await settle(5);
-  assert.equal(posts('/api/requests/2/run'),1);
-  // Session lost on the server: the run asks for a connection again.
-  serverSession = false;
+  assert.equal(posts('/api/requests/2/authorize'),0); assert.equal(posts('/api/requests/2/run'),1);
+  state.sessionConnected=false;
   state.requests.unshift({requestId:3,jobName:'ThirdJob',sql1:'SELECT 1',requestedBy:'CORP\\consultant',requestedAt:new Date().toISOString(),status:'Pending'});
-  await w.refreshForTest(); runButton(3).click(); await settle();
-  d.getElementById('confirmYes').click(); await settle(5);
-  assert.ok(d.getElementById('connectionDialog').open,'expired session asks for a connection');
-  d.getElementById('connectionDialog').close();
+  await w.refreshForTest(); runButton(3).click(); await settle(5);
+  assert.equal(w.sessionStorage.getItem('jobRunnerExecutionSession'),null,'expired server session clears the browser token');
+  assert.ok(d.getElementById('connectionDialog').open,'expired session requires login');
+  d.querySelector('[data-close="connectionDialog"]').click(); await settle();
+  assert.equal(posts('/api/requests/3/authorize'),0,'cancelled login never authorizes');
+  assert.equal(posts('/api/requests/3/run'),0);
   // A second request for a job that is already running cannot be started.
   state.requests.unshift({requestId:4,jobName:' TPESATY_lkppushpayloadtype ',sql1:'SELECT 1',requestedBy:'CORP\\consultant',requestedAt:new Date().toISOString(),status:'Pending'});
   await w.refreshForTest(); assert.ok(!runButton(4).disabled,'different requests may share a job name');
@@ -146,29 +172,136 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   assert.deepEqual(shown().sort(),['1','3','4']);
   state.requests.find(r => r.requestId === 1).executedAt = new Date(Date.now() + 60000).toISOString();
   await w.refreshForTest(); d.querySelector('[data-view="history"]').click();
-  assert.deepEqual(shown(),['1','4','3','2']);
+  assert.deepEqual(shown(),['1','2']);
+  assert.ok(!d.getElementById('tableHead').textContent.includes('İşlemler'));
   assert.ok(d.getElementById('tableHead').textContent.includes('Çalıştıran'));
   // Failed attempts can be run again from the history; running and succeeded ones cannot.
   assert.equal(runButton(2),null); assert.equal(runButton(1),null);
   state.requests.find(r => r.requestId === 2).status = 'Failed'; await w.refreshForTest();
-  assert.equal(runButton(2).textContent,'↻ Tekrar çalıştır'); assert.ok(!runButton(2).disabled);
-  runButton(2).click(); await settle();
-  assert.ok(d.getElementById('confirmDialog').open); assert.ok(d.getElementById('confirmText').textContent.includes('Önceki deneme'));
-  d.getElementById('confirmDialog').close();
+  assert.equal(runButton(2),null,'failed requests cannot run again');
   d.querySelector('[data-view="requests"]').click();
+  state.requests.find(r => r.requestId === 2).runToken = 'shared-token';
+  await w.refreshForTest(); d.querySelector('[data-view="history"]').click();
+  d.querySelector('#tableBody tr[data-id="2"]').click();
+  d.querySelector('[data-tab="steps"]').click(); await settle(6);
+  assert.equal(d.querySelectorAll('#detailBody tbody tr').length,2,'remote request shows both Agent steps');
+  assert.ok(d.getElementById('detailBody').textContent.includes('00:01:05'));
+  assert.ok(d.getElementById('detailBody').textContent.includes('50001'));
+  assert.equal(d.querySelector('#detailBody script'),null,'history messages must be escaped');
+  const disclosures = () => [...d.querySelectorAll('#detailBody details')];
+  disclosures()[0].open = true; disclosures()[1].open = true;
+  await w.refreshForTest(); await settle();
+  assert.ok(disclosures().every(element => element.open),'open messages survive automatic refresh');
+  d.getElementById('detailBody').scrollTop = 120;
+  d.querySelector('.history-scroll').scrollLeft = 80;
+  const stableTable = d.querySelector('#detailBody table');
+  await w.refreshForTest(); await settle();
+  assert.equal(d.querySelector('#detailBody table'),stableTable,'unchanged refresh preserves table DOM');
+  assert.equal(d.getElementById('detailBody').scrollTop,120);
+  assert.equal(d.querySelector('.history-scroll').scrollLeft,80);
+
+  disclosures()[0].open = false;
+  await w.refreshForTest(); await settle();
+  assert.equal(disclosures()[0].open,false,'manually closed message stays closed');
+  assert.equal(disclosures()[1].open,true,'other message stays open');
+  assert.equal(d.querySelector('[data-tab="logs"]'),null,'Messages tab removed');
+  assert.equal(d.querySelector('[data-tab="parameters"]').textContent,'Job içeriği');
+  d.querySelector('[data-tab="summary"]').click();
+  d.querySelector('[data-tab="steps"]').click(); await settle();
+  assert.equal(disclosures()[0].open,false);
+  assert.equal(disclosures()[1].open,true,'expanded messages survive tab switching');
+  assert.equal(d.querySelector('[data-tab="ssis"]'),null,'SSIS removed from job details');
+  const detailBeforeSsis = d.getElementById('detailBody').innerHTML;
+  assert.ok(d.querySelector('.topbar .actions #ssisBtn'),'SSIS in top-right actions');
+  d.getElementById('ssisBtn').click(); await settle(6);
+  assert.ok(d.getElementById('ssisDialog').open);
+  assert.ok(d.getElementById('ssisBody').textContent.includes('Cannot insert NULL into EdwEtlDate.'));
+  assert.ok(d.getElementById('ssisBody').textContent.includes('EDW_MAIN_LOADER'));
+  assert.ok(d.getElementById('ssisBody').textContent.includes('Türkiye saati'));
+  assert.equal(d.querySelector('#ssisBody script'),null,'SSIS messages are escaped');
+  assert.equal(d.getElementById('detailBody').innerHTML,detailBeforeSsis,'global panel does not change job details');
+  assert.ok(d.querySelector('#ssisBody table.ssis-table'),'SSIS errors are a table');
+  assert.equal(d.querySelectorAll('#ssisBody thead th').length,6);
+  assert.equal(d.querySelectorAll('[data-ssis-group]').length,2,'one group per execution ID');
+  assert.equal(d.querySelectorAll('#ssisBody tr.ssis-error:not([hidden])').length,0,'groups start collapsed');
+  d.querySelector('[data-ssis-group]').click();
+  assert.equal(d.querySelectorAll('#ssisBody tr.ssis-error:not([hidden])').length,2,'same execution errors open together');
+  d.querySelector('#ssisBody [data-ssis-message]').click();
+  assert.ok(d.getElementById('ssisMessageDialog').open);
+  const firstSsisMessage=d.querySelector('#ssisMessageBody pre').textContent;
+  assert.ok(firstSsisMessage.includes('<script>unsafe</script>'));
+  assert.equal(d.querySelector('#ssisMessageBody script'),null,'full message is escaped');
+  assert.equal(d.querySelector('#ssisBody .ssis-error pre'),null,'no full message repeated under the preview');
+  assert.equal(d.querySelector('#ssisBody .ssis-error details'),null,'no inline metadata disclosure');
+  assert.ok(d.getElementById('ssisMessagePrev').disabled);
+  d.getElementById('ssisMessageNext').click();
+  assert.equal(d.querySelector('#ssisMessageBody pre').textContent,'Second error message');
+  assert.ok(d.getElementById('ssisMessageNext').disabled,'navigation stays in selected execution group');
+  d.getElementById('ssisMessagePrev').click();
+  assert.equal(d.querySelector('#ssisMessageBody pre').textContent,firstSsisMessage);
+  d.querySelector('[data-ssis-message-tab="execution"]').click();
+  assert.equal(d.querySelector('#ssisMessageBody pre'),null,'metadata has its own page');
+  assert.ok(d.getElementById('ssisMessageBody').textContent.includes('Çalışma yolu'));
+  d.querySelector('[data-close="ssisMessageDialog"]').click();
+  assert.ok(d.getElementById('ssisDialog').open,'closing message returns to error table');
+  const beforeReload = requests.filter(r=>r.url.includes('/ssis-errors')).length;
+  d.getElementById('ssisRefreshBtn').click(); await settle(6);
+  assert.equal(requests.filter(r=>r.url.includes('/ssis-errors')).length,beforeReload+1);
+  assert.equal(d.querySelector('[data-ssis-group]').getAttribute('aria-expanded'),'true','expanded group survives refresh');
+  assert.equal(d.querySelectorAll('#ssisBody tr.ssis-error:not([hidden])').length,2);
+  d.getElementById('ssisGroupToggle').checked=false; d.getElementById('ssisGroupToggle').dispatchEvent(new w.Event('change'));
+  assert.equal(d.querySelectorAll('[data-ssis-group]').length,0,'flat view remains available');
+  assert.equal(d.querySelectorAll('#ssisBody tr.ssis-error:not([hidden])').length,3);
+  d.getElementById('ssisGroupToggle').checked=true; d.getElementById('ssisGroupToggle').dispatchEvent(new w.Event('change'));
+  assert.equal(w.localStorage.getItem('jobRunnerSsisGrouped'),'true');
+  assert.equal(d.getElementById('ssisDate'),null,'rolling window replaces calendar-day selector');
+  assert.ok(d.getElementById('ssisDialog').textContent.includes('Son 48 saat'));
+  assert.equal(d.querySelectorAll('#ssisBody .ssis-error').length,3,'same message across day responses is not duplicated');
+  assert.ok(requests.filter(r=>r.url.includes('/ssis-errors')).every(r=>r.url.startsWith('/api/ssis-errors')),'no job-scoped SSIS requests');
+  d.querySelector('[data-close="ssisDialog"]').click();
+  assert.ok(!d.getElementById('ssisDialog').open);
+  d.querySelector('[data-tab="summary"]').click();
+  assert.equal(d.getElementById('runRequestBtn'),null,'no detail rerun button');
+  d.querySelector('[data-view="requests"]').click();
+  const deleteButton = () => d.querySelector('[data-action="delete-request"][data-request="4"]');
+  d.querySelector('#tableBody tr[data-id="4"]').click();
+  assert.equal(d.getElementById('runRequestBtn'),null,'summary has no run button');
+  deleteButton().click(); await settle();
+  assert.ok(d.getElementById('confirmDialog').open);
+  assert.ok(!requests.some(r => r.url === '/api/requests/4' && r.options.method === 'DELETE'));
+  d.getElementById('confirmCancel').click(); await settle();
+  assert.ok(state.requests.some(r => r.requestId === 4));
+  deleteButton().click(); d.getElementById('confirmYes').click(); await settle(6);
+  assert.ok(!state.requests.some(r => r.requestId === 4));
+  assert.equal(d.querySelector('[data-action="delete-request"][data-request="1"]'),null,'running request cannot be deleted');
+  const noticesBeforeImport=notices.length;
+  state.requests.push({requestId:100,jobName:'Legacy completed job',requestedBy:'historical-user',executedBy:'Historical import',runToken:'H:00000000000000000000000000000001:99:1',status:'Succeeded',isImported:true,requestedAt:new Date().toISOString()});
+  await w.refreshForTest(); await settle();
+  assert.equal(notices.length,noticesBeforeImport,'historical imports are not new request notifications');
+  assert.equal(d.querySelector('#tableBody tr[data-id="100"]'),null,'import not shown in requests');
+  d.querySelector('[data-view="history"]').click();
+  assert.ok(d.querySelector('#tableBody tr[data-id="100"]'));
+  d.querySelector('#tableBody tr[data-id="100"]').click();
+  assert.equal(runButton(100),null);
+  assert.equal(d.querySelector('[data-action="delete-request"][data-request="100"]'),null);
+  d.querySelector('[data-tab="parameters"]').click();
+  assert.ok(d.getElementById('detailBody').textContent.includes('Geçmiş kayıt; çalıştırılamaz.'));
+  d.querySelector('[data-tab="summary"]').click();
+  d.querySelector('[data-view="requests"]').click();
+  console.log('PASS: shared Agent history, step durations, full escaped messages, no rerun');
   console.log('PASS: shared job names, requests tab shows waiting/running, history shows all newest first');
-  console.log('PASS: connection required once per session, recent connections, auth rows, password clearing, no database field');
+  console.log('PASS: saved execution session, reuse between runs, expired session login and password clearing');
 
   // Settings: request server is editable, defaults to SRVDEV\PASIFIK, and reports an unreachable server.
   d.getElementById('settingsBtn').click(); await settle();
   const sf = d.getElementById('settingsForm').elements;
-  assert.ok(d.getElementById('settingsDialog').open); assert.equal(sf.server.value,'SRVDEV\\PASIFIK');
+  assert.ok(d.getElementById('settingsDialog').open); assert.equal(sf.server.value,'PASIFIK');
   sf.server.value = 'BAD'; d.getElementById('settingsForm').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true})); await settle(5);
   assert.equal(settings.server,'BAD'); assert.ok(d.getElementById('settingsDialog').open);
   assert.ok(d.getElementById('settingsStatus').textContent.includes('unreachable'));
-  d.getElementById('settingsDefaultBtn').click(); assert.equal(sf.server.value,'SRVDEV\\PASIFIK');
+  d.getElementById('settingsDefaultBtn').click(); assert.equal(sf.server.value,'PASIFIK');
   d.getElementById('settingsForm').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true})); await settle(5);
-  assert.equal(settings.server,'SRVDEV\\PASIFIK'); assert.ok(!d.getElementById('settingsDialog').open);
+  assert.equal(settings.server,'PASIFIK'); assert.ok(!d.getElementById('settingsDialog').open);
   console.log('PASS: settings dialog, default request server, unreachable server message');
 
   d.getElementById('themeBtn').click(); assert.equal(d.documentElement.dataset.theme,'dark');
@@ -209,5 +342,49 @@ const runButton = id => d.querySelector(`[data-action="run-request"][data-reques
   assert.equal(d.getElementById('addBtn').textContent,'Yeni istek');
   assert.equal(w.localStorage.getItem('jobRunnerLang'),'tr');
   console.log('PASS: TR/EN switch, exact button placement, persisted language, static/dynamic translations, SQL preservation and parser errors');
+  d.querySelector('[data-close="jobDialog"]').click();
+  assert.equal(d.querySelector('#settingsDialog .hint'),null,'no table implementation note in settings');
+  d.getElementById('ssisBtn').click(); await settle(6);
+  assert.ok(!d.getElementById('ssisBody').textContent.includes('Job eşleştirmesi'));
+  assert.equal(d.querySelector('#ssisDialog .ssis-toolbar [data-i18n="EDW, ERPEDW, MessageUtilization · Yalnızca OnError"]'),null,'no implementation note in SSIS toolbar');
+  d.querySelector('#ssisBody [data-ssis-message]').click();
+  const originalSqlError=d.querySelector('#ssisMessageBody pre').textContent;
+  d.getElementById('langBtn').click();
+  assert.ok(d.getElementById('ssisTitle').textContent.includes('SSIS Errors'));
+  assert.ok(d.getElementById('ssisUpdated').textContent.includes('Last updated'));
+  assert.equal(d.getElementById('ssisChecked'),null,'only table update time is displayed');
+  assert.equal(d.querySelector('#ssisMessageBody pre').textContent,originalSqlError);
+  d.querySelector('[data-ssis-message-tab="execution"]').click();
+  assert.ok(d.getElementById('ssisMessageBody').textContent.includes('Execution path'));
+  assert.ok(d.getElementById('ssisBody').textContent.includes('Source'));
+  assert.ok(d.querySelector('#ssisBody thead').textContent.includes('Error time'));
+  assert.ok(d.querySelector('#ssisBody thead').textContent.includes('Folder / Project'));
+  assert.equal(d.querySelector('[data-ssis-group]').getAttribute('aria-expanded'),'true','expanded group survives language switch');
+  d.querySelector('[data-ssis-message-tab="message"]').click();
+  assert.equal(d.querySelector('#ssisMessageBody pre').textContent,originalSqlError,'SQL diagnostic text remains exact');
+  d.querySelector('[data-close="ssisMessageDialog"]').click();
+  assert.equal(d.querySelector('[data-i18n="Şifreleme"]').textContent,'Encryption');
+  assert.equal(d.querySelector('[data-i18n="Evet"]').textContent,'Yes');
+  ssisFailure=true;
+  d.getElementById('ssisRefreshBtn').click(); await settle(6);
+  assert.ok(d.getElementById('ssisBody').textContent.includes('Unable to load SSIS errors.'));
+  assert.ok(d.getElementById('ssisBody').textContent.includes('Unable to read SSIS errors: SQL raw error'));
+  d.getElementById('langBtn').click();
+  assert.ok(d.getElementById('ssisBody').textContent.includes('SSIS hataları yüklenemedi.'));
+  assert.ok(d.getElementById('ssisBody').textContent.includes('SSIS hataları okunamadı: SQL raw error'));
+  assert.equal(d.querySelector('[data-i18n="Şifreleme"]').textContent,'Şifreleme');
+  d.querySelector('[data-close="ssisDialog"]').click();
+  state.requestsError='İstek tablosu okunamadı: SQL raw error';
+  await w.refreshForTest(); await settle();
+  assert.equal(d.getElementById('healthText').textContent,'İstekler yüklenemedi.');
+  d.getElementById('langBtn').click();
+  assert.equal(d.getElementById('healthText').textContent,'Unable to load requests.');
+  assert.equal(d.getElementById('healthText').title,'Unable to read the request table: SQL raw error');
+  assert.equal(w.message('SSIS hataları okunamadı: SQL raw error'),'Unable to read SSIS errors: SQL raw error');
+  assert.equal(w.message('İstek silinemedi: SQL raw error'),'Unable to delete the request: SQL raw error');
+  d.getElementById('langBtn').click();
+  assert.equal(w.message('Unable to read SSIS errors: SQL raw error'),'SSIS hataları okunamadı: SQL raw error');
+  console.log('PASS: production copy, open SSIS panel language changes, translated failures and settings, exact SQL messages');
+
   dom.window.close();
 })().catch(error => { console.error(error); process.exitCode = 1; dom.window.close(); });

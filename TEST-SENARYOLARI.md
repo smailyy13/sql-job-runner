@@ -2,7 +2,7 @@
 
 `Start-Demo.ps1` dosyasını PowerShell ile çalıştırın ve http://127.0.0.1:5296/ adresini açın. Normal uygulama 5295 portundadır. Test verileri `%LOCALAPPDATA%\SqlJobRunnerDemo` klasöründe tutulur. Test ortamı SQL bağlantısı açmaz; EXEC ve paketlerin içeriği çalıştırılmaz. Gerçek SQL yetkilerini, paketleri ve EdwJobGenerator prosedürünü bu ortam doğrulamaz.
 
-Üstteki TEST / DEMO satırından senaryo seçip **EXEC örneği / Load EXEC** düğmesine, ardından **Çalıştır** düğmesine basın. Bağlantı başlangıçta DEMO olarak hazırdır. Süreler yaklaşık olup 5 saniyelik izleme döngüsüne göre birkaç saniye değişebilir.
+Üstteki TEST / DEMO satırından senaryo seçip **EXEC örneği / Load EXEC** düğmesine, ardından **Çalıştır** düğmesine basın. Bağlantı başlangıçta DEMO olarak hazırdır. Süreler yaklaşık olup 3 saniyelik izleme döngüsüne göre birkaç saniye değişebilir.
 
 | Senaryo | Beklenen sonuç |
 |---|---|
@@ -77,3 +77,9 @@ SQL/paket adımı eksik (parser kabul eder, Çalıştır sonrası sunucu doğrul
 ```sql
 EXEC EdwJobGenerator @JobName='DEMO_EMPTY', @Sql1=NULL;
 ```
+
+## Ortak ayrıntılı geçmiş
+1. Birinci bilgisayarda iki adımlı isteği çalıştırın; ikinci adım hata versin.
+2. Başka bir bilgisayarda geçmişten aynı isteği seçin. Adımlar ve Mesajlar sekmelerinde iki adımın sonuçları, süreleri ve hata metinleri görünmeli.
+3. Her iki bilgisayarda da hatalı/başarılı/iptal edilmiş istek için tekrar çalıştır düğmesi bulunmamalı.
+4. msdb okuma yetkisi olmayan bağlantıda ayrıntıların okunamadığı açıkça belirtilmeli.
