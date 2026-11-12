@@ -1,8 +1,16 @@
-﻿# SQL Job Runner
+# SQL Job Runner
 
 Windows üzerinde yerel SQL Server Agent job çalıştırma ve takip uygulaması. Arayüz SchemaDiff'in açık/koyu temasını kullanır.
 
 ## Kaynak koddan kurulum
+
+GitHub'da **Code → Download ZIP** ile indirdiyseniz ZIP'i tamamen çıkarıp proje klasöründeki **Start.cmd** dosyasına çift tıklayın. Başlatıcı .NET 8 veya daha yeni bir SDK olup olmadığını kontrol eder, projeyi derler ve uygulama hazır olunca tarayıcıyı açar. Kaynak kod için yalnız Runtime yeterli değildir; ilk derlemede NuGet paketlerini indirmek için internet bağlantısı gerekir. Hata oluşursa konsol penceresi açık kalır. Uygulamayı kullanırken bu pencereyi açık tutun.
+
+PowerShell'den tek komutla da açabilirsiniz:
+
+```powershell
+.\Start.cmd
+```
 
 Gereksinimler: Windows x64, Git ve .NET 8 SDK. Arayüz için Node.js gerekmez; Node.js yalnız arayüz testlerini çalıştırırken kullanılır. Proje şirketin mevcut `EDWUTIL.OPR.EdwJobGenerator` prosedürüne bağlıdır; genel amaçlı herhangi bir SQL Server'a kurulduğunda bu prosedürü kendisi oluşturmaz.
 
@@ -26,7 +34,7 @@ Compress-Archive -Path .\publish\* -DestinationPath .\SqlJobRunner-win-x64.zip -
 
 PowerShell yerel script çalıştırmayı engelliyorsa aynı klasörde `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Publish.ps1` komutunu kullanabilirsiniz; bu yalnız ilgili işlem için geçerlidir. Paket üretirken publish klasöründen çalışan uygulamayı kapatın.
 
-ZIP'i hedef Windows bilgisayarda tamamen bir klasöre çıkarın. **Gerçek ortam için `SqlJobRunner.exe` çalıştırın**, ardından **http://127.0.0.1:5295/** adresini açın. Yalnız EXE'yi taşımayın; `wwwroot` ve diğer paket dosyaları da gereklidir. Bu paket kendi .NET çalışma ortamını içerir; hedef bilgisayara SDK veya .NET yüklemek gerekmez.
+ZIP'i hedef Windows bilgisayarda tamamen bir klasöre çıkarın. **Gerçek ortam için `Start.cmd` dosyasına çift tıklayın veya `SqlJobRunner.exe` çalıştırın**, ardından **http://127.0.0.1:5295/** adresini açın. Yalnız EXE'yi taşımayın; `wwwroot` ve diğer paket dosyaları da gereklidir. Bu paket kendi .NET çalışma ortamını içerir; hedef bilgisayara SDK veya .NET yüklemek gerekmez.
 
 ## SQL Server olmadan demo
 
